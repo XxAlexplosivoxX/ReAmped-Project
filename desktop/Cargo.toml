@@ -1,0 +1,17 @@
+[package]
+name = "ReAmped"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+color-thief = "0.2.2"
+dirs-next = "2.0.0"
+eframe = "0.33.3"
+egui = "0.33.3"
+image = "0.25.9"
+num-complex = "0.4.6"
+player_core = { path = "../player-core/" }
+rfd = "0.17.2"
+serde = "1.0.228"
+toml = "1.0.2"
+walkdir = "2.5.0"
