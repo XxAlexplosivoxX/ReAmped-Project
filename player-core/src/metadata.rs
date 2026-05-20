@@ -20,24 +20,19 @@ pub struct CoverArt {
 }
 
 pub fn default_cover() -> CoverArt {
-const DEFAULT_COVER: &[u8] = include_bytes!("../../assets/default.png");
-CoverArt {
-    data: DEFAULT_COVER.to_vec(),
+    const DEFAULT_COVER: &[u8] = include_bytes!("../../assets/default.png");
+    CoverArt {
+        data: DEFAULT_COVER.to_vec(),
         mime: MimeType::Png,
     }
 }
 
-pub fn read_metadata(path: &Path) -> Metadata {
-    
-
+pub fn read_metadata(path: &Path) -> Option<Metadata> {
     let tagged = Probe::open(path)
         .and_then(|p| p.read())
-        .expect("Failed to read audio file");
+        .ok()?;
 
-    let duration = tagged
-        .properties()
-        .duration()
-        .as_secs_f32();
+    let duration = tagged.properties().duration().as_secs_f32();
 
     let tag = tagged.first_tag();
 
@@ -55,7 +50,7 @@ pub fn read_metadata(path: &Path) -> Metadata {
         })
         .unwrap_or_else(default_cover);
 
-    Metadata {
+    Some(Metadata {
         title: tag
             .and_then(|t| t.title())
             .map(|s| s.to_string())
@@ -68,5 +63,5 @@ pub fn read_metadata(path: &Path) -> Metadata {
 
         duration,
         cover,
-    }
+    })
 }

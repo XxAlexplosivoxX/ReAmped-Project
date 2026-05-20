@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="ReAmped" Language="1033" Version="1.0.0.0" Manufacturer="ReAmped" UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Description="ReAmped - A modern music player"/>
+    <Media Id="1" Cabinet="ReAmped.cab" EmbedCab="yes"/>
+
+    <Feature Id="ProductFeature" Title="ReAmped" Level="1">
+      <ComponentRef Id="MainExecutable"/>
+      <ComponentRef Id="ProgramMenuShortcut"/>
+      <ComponentRef Id="DesktopShortcut"/>
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="ReAmped"/>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="ReAmped"/>
+      </Directory>
+      <Directory Id="DesktopFolder" Name="Desktop"/>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <File Id="ReAmpedExe" Source="target/release/ReAmped.exe" KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ProgramMenuShortcut" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <Shortcut Id="ApplicationStartMenuShortcut" Name="ReAmped" Target="[INSTALLFOLDER]ReAmped.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run\ReAmped" Type="string" Value="" KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="D4E5F6A7-B8C9-0123-DEFA-123456789012">
+        <Shortcut Id="DesktopShortcut" Name="ReAmped" Target="[INSTALLFOLDER]ReAmped.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <RemoveFolder Id="DesktopFolder" On="uninstall"/>
+        <RegistryValue Root="HKCU" Key="Software\ReAmped" Type="string" Value="" KeyPath="yes"/>
+      </Component>
+    </DirectoryRef>
+
+    <UIRef Id="WixUI_InstallDir"/>
+    <WixVariable Id="WixUILicenseRtf" Value="LICENSE.rtf"/>
+  </Product>
+</Wix>

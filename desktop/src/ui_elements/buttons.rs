@@ -28,8 +28,17 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 drop(state);
 
                 if ui.add(egui::Button::new("⏮")).clicked() {
+                    let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Prev);
+                    // Wait for state to actually change
+                    for _ in 0..50 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        if player_app.player.playlist_idx() != old_idx {
+                            break;
+                        }
+                    }
                     player_app.ensure_cover_loaded(ctx, true);
+                    ctx.request_repaint();
                 }
 
                 if ui.add(egui::Button::new("⏹")).clicked() {
@@ -65,8 +74,17 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 }
 
                 if ui.add(egui::Button::new("⏭")).clicked() {
+                    let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Next);
+                    // Wait for state to actually change
+                    for _ in 0..50 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        if player_app.player.playlist_idx() != old_idx {
+                            break;
+                        }
+                    }
                     player_app.ensure_cover_loaded(ctx, true);
+                    ctx.request_repaint();
                 }
                 ui.style_mut().visuals.widgets.noninteractive.bg_stroke =
                     egui::Stroke::new(1.0, text_color);

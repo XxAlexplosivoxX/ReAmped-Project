@@ -52,14 +52,20 @@ fn load_current(
     let track = &playlist[index];
     backend.load(track);
 
-    let metadata = read_metadata(&track.path);
-
     let mut s = state.lock().unwrap();
 
-    s.metadata = Some(metadata.clone());
-    s.current_track = metadata.title;
-    s.duration = metadata.duration;
-    s.cover = metadata.cover;
+    if let Some(metadata) = read_metadata(&track.path) {
+        s.current_track = metadata.title.clone();
+        s.duration = metadata.duration;
+        s.cover = metadata.cover.clone();
+        s.metadata = Some(metadata);
+    } else {
+        s.current_track = track.title.clone();
+        s.duration = track.duration;
+        s.cover = default_cover();
+        s.metadata = None;
+    }
+
     s.position = 0.0;
     s.playing = true;
     s.playlist = playlist.clone();
@@ -237,6 +243,30 @@ fn audio_loop(
 
                     state.lock().unwrap().playing = true;
                 }
+                PlayerCommand::SetPlaylistAndPlayIndex(list, index) => {
+                    playlist = list;
+                    shuffled_indices = (0..playlist.len()).collect();
+                    shuffled_indices.shuffle(&mut rng);
+                    shuffle_pos = 0;
+
+                    state.lock().unwrap().playlist = playlist.clone();
+                    state.lock().unwrap().playlist_cpy = playlist.clone();
+
+                    if index < playlist.len() {
+                        current_index = index;
+
+                        if shuffle {
+                            if let Some(pos) = shuffled_indices.iter().position(|&i| i == index) {
+                                shuffle_pos = pos;
+                            }
+                        }
+
+                        load_current(&mut backend, &playlist, current_index, &state);
+                        backend.play();
+
+                        state.lock().unwrap().playing = true;
+                    }
+                }
 
                 // PlayerCommand::Load(list) => {
                 //     playlist = list.clone();
@@ -360,6 +390,12 @@ fn audio_loop(
                 }
 
                 PlayerCommand::SortBy(op) => {
+                    let current_track_path = if !playlist.is_empty() {
+                        Some(playlist[current_index].path.clone())
+                    } else {
+                        None
+                    };
+
                     match op {
                         Options::Normal => {
                             playlist = state.lock().unwrap().playlist_cpy.clone();
@@ -369,16 +405,35 @@ fn audio_loop(
                         }
                     }
 
-                    // sincronizar state
+                    if let Some(path) = current_track_path {
+                        if let Some(pos) = playlist.iter().position(|t| t.path == path) {
+                            current_index = pos;
+                        }
+                    }
+
                     let mut s = state.lock().unwrap();
                     s.playlist = playlist.clone();
+                    s.playlist_idx = current_index;
                 }
 
                 PlayerCommand::AleatoryFullRandom => {
+                    let current_track_path = if !playlist.is_empty() {
+                        Some(playlist[current_index].path.clone())
+                    } else {
+                        None
+                    };
+
                     playlist.shuffle(&mut rng);
+
+                    if let Some(path) = current_track_path {
+                        if let Some(pos) = playlist.iter().position(|t| t.path == path) {
+                            current_index = pos;
+                        }
+                    }
 
                     let mut s = state.lock().unwrap();
                     s.playlist = playlist.clone();
+                    s.playlist_idx = current_index;
                 }
 
                 PlayerCommand::JumpTo(index) => {
@@ -389,21 +444,31 @@ fn audio_loop(
                     current_index = index;
 
                     if shuffle {
-                        // sincronizar shuffle_pos con el índice real
                         if let Some(pos) = shuffled_indices.iter().position(|&i| i == index) {
                             shuffle_pos = pos;
-                        } else {
-                            // por seguridad extrema
-                            shuffled_indices.push(index);
-                            shuffle_pos = shuffled_indices.len() - 1;
                         }
                     }
 
                     load_current(&mut backend, &playlist, current_index, &state);
                     backend.play();
 
-                    let mut s = state.lock().unwrap();
-                    s.playing = true;
+                    state.lock().unwrap().playing = true;
+                }
+                PlayerCommand::JumpToPath(path) => {
+                    if let Some(index) = playlist.iter().position(|t| t.path == path) {
+                        current_index = index;
+
+                        if shuffle {
+                            if let Some(pos) = shuffled_indices.iter().position(|&i| i == index) {
+                                shuffle_pos = pos;
+                            }
+                        }
+
+                        load_current(&mut backend, &playlist, current_index, &state);
+                        backend.play();
+
+                        state.lock().unwrap().playing = true;
+                    }
                 }
 
                 PlayerCommand::SetGainBass(gain) => {

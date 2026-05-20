@@ -13,8 +13,9 @@ pub fn mini_playlist<F>(
     pos: f32,
     just_executed: bool,
     search_str: String,
+    scroll_current_track: &mut bool,
 ) where
-    F: FnMut(usize),
+    F: FnMut(&Track),
 {
     let row_height = 18.0;
     let max_rows = 8;
@@ -31,7 +32,7 @@ pub fn mini_playlist<F>(
                 .max_height(height)
                 .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
-                    for (i, track) in playlist.iter().enumerate() {
+                    for (_i, track) in playlist.iter().enumerate() {
                         if !search.is_empty() && search.len() >= 3 {
                             if !track.title.to_ascii_lowercase().contains(&search) {
                                 continue;
@@ -50,12 +51,13 @@ pub fn mini_playlist<F>(
 
                         let resp = ui.add(egui::Button::selectable(is_current, label).fill(accent));
 
-                        if is_current && pos < 0.1 && !just_executed {
+                        if is_current && ((pos < 0.1 && !just_executed) || *scroll_current_track) {
                             resp.scroll_to_me(Some(egui::Align::Center));
+                            *scroll_current_track = false;
                         }
 
                         if resp.clicked() {
-                            on_select(i);
+                            on_select(track);
                         }
                     }
                 });

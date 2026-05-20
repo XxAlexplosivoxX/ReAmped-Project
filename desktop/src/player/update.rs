@@ -1,5 +1,6 @@
 use egui::{Color32, style::HandleShape};
 use player_core::{PlayerCommand, viz::waveform::waveform};
+use std::time::Duration;
 
 use crate::{
     dsp_ui::{
@@ -12,7 +13,7 @@ use crate::{
         order_buttons::show_order_buttons, search_and_miniplaylist::show_search_and_miniplaylist,
         volume_bar::show_volume_bar,
     },
-    utils::{background::draw_slanted_vertical_gradient, visualizer::draw_waveform_raw},
+    utils::{background::draw_slanted_vertical_gradient, visualizer::draw_waveform_raw, keyboard::handle_keyboard_input},
 };
 
 impl eframe::App for PlayerApp {
@@ -23,23 +24,16 @@ impl eframe::App for PlayerApp {
         let accent = panel.clone();
         let accent = accent.gamma_multiply(1.2);
         let text = Color32::from_rgb(palette[0][0], palette[0][1], palette[0][2]);
-        // 1. Get physical width from the viewport
         let physical_width = ctx.input(|i| i.viewport_rect().width() * i.pixels_per_point());
 
-        // 2. Your target "internal" width for the design
         let base_width = 532.0;
 
-        // 3. Calculate what the scale SHOULD be to keep your UI looking the same
-        // We divide physical pixels by base_width to see how many "points" we need
         let target_scale = physical_width / base_width;
 
-        // 4. Set the scale absolutely
         ctx.set_pixels_per_point(target_scale);
 
         self.ensure_cover_loaded(&ctx, false);
         show_config_window(self, ctx, accent);
-
-        // Inside your App struct
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
@@ -106,12 +100,9 @@ impl eframe::App for PlayerApp {
                                 });
                                 ui.vertical(|ui| {
                                     show_search_and_miniplaylist(ui, self, accent);
-                                    // Bottom row: The Visualizer
-                                    // Force the visualizer to take up the remaining space
                                     let samples = &self.player.samples;
                                     let palette = &self.palette_sorted;
 
-                                    // Wrap in a sized UI if it's still disappearing
                                     self.visualizer.draw_spectrum(
                                         ui,
                                         samples,
@@ -121,7 +112,6 @@ impl eframe::App for PlayerApp {
                                     );
                                 });
                             });
-                            // Middle row: Search
                         });
                     });
                 });
@@ -197,16 +187,29 @@ impl eframe::App for PlayerApp {
             );
             self.visualizer.draw_beat_stripes(ui, accent, text);
             if self.player.is_playing() {
-                ctx.request_repaint();
                 self.state = String::from("status: Playing");
                 self.just_executed = false;
             } else {
-                ctx.request_repaint();
                 self.state = String::from("status: Paused")
+            }
+
+            if self.player.is_playing() {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(16));
             }
 
             if self.player.playlist().is_empty() {
                 self.load_library_async();
+            }
+
+            // Handle keyboard input
+            let config = self.config.lock().unwrap();
+            let keybindings = config.keybindings.clone();
+            drop(config);
+            
+            if let Some(cmd) = handle_keyboard_input(ctx, &keybindings, self.player.is_playing()) {
+                self.player.send(cmd);
             }
         });
     }

@@ -1,0 +1,24 @@
+# Maintainer: ReAmped Developer
+pkgname=reamped
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A modern music player built in Rust with support for multiple audio formats"
+arch=('x86_64' 'aarch64')
+url="https://github.com/your-repo/reamped"
+license=('MIT')
+depends=('alsa-lib' 'libxcb' 'libxkbcommon')
+makedepends=('rust' 'cargo' 'pkg-config')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --all
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/ReAmped "$pkgdir/usr/bin/reamped"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 ~/.local/share/applications/ReAmped.desktop "$pkgdir/usr/share/applications/reamped.desktop"
+}

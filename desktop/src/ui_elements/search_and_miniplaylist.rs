@@ -1,6 +1,6 @@
 use crate::{PlayerApp, ui_elements::mini_playlist::mini_playlist};
+use player_core::{Track, PlayerCommand};
 use egui::{Color32, RichText, TextEdit, Ui};
-use player_core::PlayerCommand;
 use std::{time::Duration, thread::sleep};
 
 pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp, accent: Color32) {
@@ -43,10 +43,11 @@ pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp, accent:
                 player.current_track.clone(),
                 player.player.is_playing(),
                 accent,
-                |i| player.player.send(PlayerCommand::JumpTo(i)),
+                |track: &Track| player.player.send(PlayerCommand::JumpToPath(track.path.clone())),
                 player.position,
                 player.just_executed,
                 player.search_str.clone(),
+                &mut player.scroll_current_track,
             );
         })
         .response

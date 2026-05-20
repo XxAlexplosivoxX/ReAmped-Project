@@ -346,6 +346,43 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             }
 
                             ui.add_space(10.0);
+                            ui.heading("Reproducción");
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut cfg.crossfade_seconds, 0.0..=15.0)
+                                        .step_by(0.1)
+                                        .text("Duración del crossfade (segundos)"),
+                                )
+                                .drag_stopped()
+                            {
+                                save_config(&cfg);
+                            }
+
+                            ui.add_space(10.0);
+                            ui.heading("Atajos de teclado");
+                            ui.separator();
+
+                            ui.label("Presiona una tecla y selecciona la acción:");
+                            
+                            let default_bindings = [
+                                ("Space", "Play/Pause"),
+                                ("ArrowRight", "Siguiente canción"),
+                                ("ArrowLeft", "Canción anterior"),
+                                ("M", "Modo aleatorio"),
+                                ("R", "Repetir"),
+                                ("S", "Detener"),
+                            ];
+
+                            for (key, action) in &default_bindings {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{:<12} →", key));
+                                    ui.label(action.to_string());
+                                });
+                            }
+
+                            ui.add_space(10.0);
                             ui.heading("Música local");
                             ui.separator();
 

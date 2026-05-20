@@ -1,10 +1,10 @@
-use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, sync::{Arc, Mutex}, thread, time::Duration};
 use egui::Color32;
 use player_core::{
     Player, PlayerCommand, Track,
     player::Options,
 };
-use crate::{utils::{load_cover::load_cover_texture, misc::extract_palette, luminance::luminance, scan_music_dirs::scan_music_dirs, visualizer::SpectrumVisualizer}};
+use crate::{utils::{load_cover::load_cover_texture, media_controls::{MediaControls, MediaSnapshot}, misc::extract_palette, luminance::luminance, scan_music_dirs::scan_music_dirs, visualizer::SpectrumVisualizer}};
 use player_core::config::{AppConfig, load_config};
 
 #[derive(Clone)]
@@ -12,6 +12,7 @@ pub struct PlayerApp {
     pub player: Player,
     pub volume: f32,
     pub visualizer: SpectrumVisualizer,
+    pub media_controls: MediaControls,
     pub cover_texture: Option<egui::TextureHandle>,
     pub current_track: Option<Track>,
     pub position: f32,
@@ -34,16 +35,30 @@ pub struct PlayerApp {
     pub bass_val: f32,
     pub mid_val: f32,
     pub high_val: f32,
-    pub width_val: f32
+    pub width_val: f32,
+    pub startup_tracks: Vec<Track>,
+    pub scroll_current_track: bool,
 }
 
 impl Default for PlayerApp {
     fn default() -> Self {
-        let config = Arc::new(Mutex::new(load_config()));
-        Self {
-            player: Player::new(load_config().volume),
-            volume: load_config().volume,
-            visualizer: SpectrumVisualizer::new(config.clone()),
+        Self::new(Vec::new())
+    }
+}
+
+impl PlayerApp {
+    pub fn new(startup_tracks: Vec<Track>) -> Self {
+        let config_values = load_config();
+        let config = Arc::new(Mutex::new(config_values.clone()));
+        let visualizer = SpectrumVisualizer::new(config.clone());
+        let player = Player::new(config_values.volume);
+        let media_controls = MediaControls::start(player.clone());
+
+        let app = Self {
+            player,
+            volume: config_values.volume,
+            visualizer,
+            media_controls,
             cover_texture: None,
             current_track: None,
             position: 0.0,
@@ -51,50 +66,81 @@ impl Default for PlayerApp {
             palette_sorted: vec![[0, 0, 0], [0, 0, 0], [0, 0, 0]],
             state: String::from("status: Welcome"),
             text_color: Color32::WHITE,
-            fullscreen: false,
+            fullscreen: config_values.fullscreen,
             show_settings: false,
             just_executed: true,
-            config: config,
+            config,
             rgb1: [
-                load_config().theme.pallete_custom[0][0] as f32 / 255.0,
-                load_config().theme.pallete_custom[0][1] as f32 / 255.0,
-                load_config().theme.pallete_custom[0][2] as f32 / 255.0,
+                config_values.theme.pallete_custom[0][0] as f32 / 255.0,
+                config_values.theme.pallete_custom[0][1] as f32 / 255.0,
+                config_values.theme.pallete_custom[0][2] as f32 / 255.0,
             ],
             rgb2: [
-                load_config().theme.pallete_custom[1][0] as f32 / 255.0,
-                load_config().theme.pallete_custom[1][1] as f32 / 255.0,
-                load_config().theme.pallete_custom[1][2] as f32 / 255.0,
+                config_values.theme.pallete_custom[1][0] as f32 / 255.0,
+                config_values.theme.pallete_custom[1][1] as f32 / 255.0,
+                config_values.theme.pallete_custom[1][2] as f32 / 255.0,
             ],
             rgb3: [
-                load_config().theme.pallete_custom[2][0] as f32 / 255.0,
-                load_config().theme.pallete_custom[2][1] as f32 / 255.0,
-                load_config().theme.pallete_custom[2][2] as f32 / 255.0,
+                config_values.theme.pallete_custom[2][0] as f32 / 255.0,
+                config_values.theme.pallete_custom[2][1] as f32 / 255.0,
+                config_values.theme.pallete_custom[2][2] as f32 / 255.0,
             ],
             show_picker1: false,
             show_picker2: false,
             show_picker3: false,
             search_str: String::from(""),
             sort_option: Options::Normal,
-            bass_val: 1.0, 
-            mid_val: 1.0, 
-            high_val: 1.0, 
-            width_val: 1.0
-        }
-    }
-}
+            bass_val: 1.0,
+            mid_val: 1.0,
+            high_val: 1.0,
+            width_val: 1.0,
+            startup_tracks,
+            scroll_current_track: false,
+        };
 
-impl PlayerApp {
+        app.spawn_media_sync_thread();
+        app
+    }
+
+    fn spawn_media_sync_thread(&self) {
+        let player = self.player.clone();
+        let media_controls = self.media_controls.clone();
+
+        thread::spawn(move || {
+            loop {
+                let state = player.state.lock().unwrap();
+                let playlist = state.playlist.clone();
+                let playlist_idx = state.playlist_idx;
+                let current_track = playlist.get(playlist_idx).cloned();
+
+                media_controls.sync_from_snapshot(MediaSnapshot {
+                    current_track,
+                    playing: state.playing,
+                    playlist_len: playlist.len(),
+                    playlist_idx,
+                });
+
+                drop(state);
+                thread::sleep(Duration::from_millis(150));
+            }
+        });
+    }
+
     pub fn ensure_cover_loaded(&mut self, ctx: &egui::Context, ovride: bool) {
         let cfg = self.config.lock().unwrap();
         let current_track = {
-            let state = self.player.state.lock().unwrap();
-            let playing = state.playing;
-            drop(state);
-
             let pl = self.player.playlist();
             let idx = self.player.playlist_idx();
 
-            if playing && !pl.is_empty() {
+            // Only expose a "current track" to the UI if the backend
+            // actually has something loaded (duration > 0), metadata is
+            // present, or the player is playing. This avoids showing the
+            // first playlist entry selected/paused before any backend load.
+            let state = self.player.state.lock().unwrap();
+            let has_loaded = state.duration > 0.0 || state.metadata.is_some() || state.playing;
+            drop(state);
+
+            if has_loaded && !pl.is_empty() {
                 Some(pl[idx].clone())
             } else {
                 None
@@ -170,18 +216,39 @@ impl PlayerApp {
             ctx.set_visuals(visuals);
         }
     }
+
     pub fn load_library_async(&self) {
         let cfg = self.config.lock().unwrap();
         let sender = self.player.clone();
         let dirs = cfg.music_dirs.clone();
         let sort_option = self.sort_option.clone();
+        let startup_tracks = self.startup_tracks.clone();
+        let should_autoplay = !startup_tracks.is_empty();
 
         std::thread::spawn(move || {
-            let tracks = scan_music_dirs(&dirs);
+            let mut library_tracks = scan_music_dirs(&dirs);
 
-            if !tracks.is_empty() {
-                sender.send(PlayerCommand::SetPlaylist(tracks));
-                sender.send(PlayerCommand::SortBy(sort_option));
+            if matches!(sort_option, Options::Alphabetical) {
+                library_tracks.sort_by(|a, b| a.title.cmp(&b.title));
+            }
+
+            let mut tracks = Vec::with_capacity(startup_tracks.len() + library_tracks.len());
+            let mut seen_paths = HashSet::new();
+
+            for track in startup_tracks.into_iter().chain(library_tracks.into_iter()) {
+                if seen_paths.insert(track.path.clone()) {
+                    tracks.push(track);
+                }
+            }
+
+            let has_tracks = !tracks.is_empty();
+
+            if has_tracks {
+                if should_autoplay {
+                    sender.send(PlayerCommand::SetPlaylistAndPlayIndex(tracks, 0));
+                } else {
+                    sender.send(PlayerCommand::SetPlaylist(tracks));
+                }
             }
         });
     }

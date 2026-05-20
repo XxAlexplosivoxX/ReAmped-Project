@@ -1,0 +1,20 @@
+Source: reamped
+Priority: optional
+Maintainer: ReAmped Developer <dev@reamped.local>
+Build-Depends: debhelper-compat (= 13), rustc, cargo, pkg-config, libasound2-dev, libssl-dev
+Standards-Version: 4.5.1
+Homepage: https://github.com/your-repo/reamped
+
+Package: reamped
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libasound2
+Description: A modern music player built in Rust
+ ReAmped is a high-performance music player with support for multiple audio
+ formats, metadata caching, MPRIS integration, and low CPU consumption.
+ .
+ Features:
+  - Support for MP3, FLAC, WAV, OGG, AIFF, AC3, MKA, MKV and more
+  - Magic-number file detection
+  - Metadata caching for faster scanning
+  - MPRIS D-Bus integration for multimedia controls
+  - Optimized CPU usage (2-3% when playing)

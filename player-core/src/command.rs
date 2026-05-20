@@ -1,6 +1,7 @@
 use crate::{Track, player::Options};
+use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlayerCommand {
     Load(Vec<Track>),
     Samples,
@@ -16,8 +17,10 @@ pub enum PlayerCommand {
     ToggleRepeat,
     ToggleRepeatOne,
     JumpTo(usize),
+    JumpToPath(PathBuf),
     SetPlaylist(Vec<Track>),
     PlayIndex(usize),
+    SetPlaylistAndPlayIndex(Vec<Track>, usize),
     ReloadCurrent,
     AleatoryFullRandom,
     SortBy(Options),
