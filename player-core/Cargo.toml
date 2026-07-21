@@ -1,10 +1,15 @@
 [package]
 name = "player_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
+[features]
+default = ["symphonia-backend"]
+symphonia-backend = []
+c-ffi = []
+
 [dependencies]
-lofty = "0.23.1"
+lofty = "0.24.0"
 num-complex = "0.4.6"
 rustfft = "6.4.1"
 serde = { version = "1.0.228", features = ["derive"] }

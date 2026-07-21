@@ -15,7 +15,10 @@ fn config_path() -> PathBuf {
 pub struct AppConfig {
     pub volume: f32,
     pub fullscreen: bool,
+    pub crossfade_enabled: bool,
     pub crossfade_seconds: f32,
+    #[serde(default)]
+    pub silence_trim_enabled: bool,
     pub theme: ThemeConfig,
     pub fft_size: usize,
     pub spectrum_smooth: bool,
@@ -39,7 +42,9 @@ impl Default for AppConfig {
         Self {
             volume: 1.0,
             fullscreen: false,
-            crossfade_seconds: 20.0,
+            crossfade_enabled: false,
+            crossfade_seconds: 6.0,
+            silence_trim_enabled: false,
             theme: ThemeConfig {
                 follow_cover: true,
                 base_scale: 1.0,

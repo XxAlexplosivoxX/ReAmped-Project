@@ -1,0 +1,38 @@
+Actúa como un Ingeniero de Software de Audio Senior experto en procesado de señal en tiempo real (DSP), gestión de streams de audio y arquitecturas de reproductores de música.
+
+Contexto: Estoy desarrollando un reproductor de audio en el que ya existe un menú/panel de configuración funcional. Quiero agregar una nueva funcionalidad de "Crossfade" (fundido cruzado entre canciones) que sea configurable desde la UI y que maneje cualquier interrupción o cambio de estado de manera impecable y sin glitches de audio (pops, clicks o solapamientos extraños).
+
+Instrucción Principal:
+Implementa un sistema de Crossfade configurable que gestione dos streams/decodificadores de audio simultáneos (Primary Stream y Secondary/Outgoing Stream) y una matriz de estados estricta para resolver interrupciones en tiempo real.
+
+Requerimientos de Configuración (UI & Settings):
+1. Expón un parámetro en la configuración existente: "Crossfade Duration" (con opción de activado/desactivado y un rango configurable de 0 a 12 segundos.
+2. Si la duración es 0s o está desactivado, el reproductor debe usar reproducción Gapless o transición instantánea estándar, pero solucionando un bug que hace saltar a la siguiente cancion automáticamente aunque falten pocos segundos para terminar.
+
+Requerimientos del Engine de Audio (DSP & Streaming):
+1. Curva de Atenuación: Aplica una curva de volumen de igual potencia (Equal Power Crossfade, ej. sen/cos o sqrt) para evitar caídas de volumen percibido a la mitad de la transición.
+2. Detección Temprana: Inicia la preparación (buffer/decodificación) del siguiente track $N$ segundos antes del final de la canción actual, donde $N$ es el tiempo configurado de crossfade.
+3. De ser posible añade un trim del silencio al principio y al final de cada tema siempre y cuando el silencio sea absoluto.
+
+Manejo Estricto de Casos Borde (Edge Cases & Interrupciones):
+
+Devuelve la lógica/código necesario para manejar de forma limpia y segura los siguientes escenarios:
+
+- Caso A: Cambio manual a "Siguiente Track" durante un Crossfade activo.
+  * Solución requerida: Detener/cancelar inmediatamente el fade del track saliente (fade out ultrarrápido de ~10ms para evitar 'pop' analógico) y comenzar un nuevo Crossfade limpio hacia la canción solicitada.
+- Caso B: Cambio manual a "Canción Anterior" o selección de un track arbitrario de la playlist mientras hay un Crossfade en curso.
+  * Solución requerida: Abortar los dos streams actuales, liberar recursos del stream saliente y lanzar la nueva canción (con o sin un fade-in rápido según la configuración).
+- Caso C: Pausa / Play presionado durante un Crossfade.
+  * Solución requerida: Pausar ambos streams simultáneamente congelando el progreso del fade. Al reanudar (Play), continuar el crossfade desde el punto exacto de ganancia/volumen donde se pausó.
+- Caso D: Seek (saltar en la línea de tiempo) a una posición dentro de la zona de Crossfade.
+  * Solución requerida: Recalcular la ganancia proporcional de ambos tracks inmediatamente basándose en la nueva posición de tiempo. Si el seek es fuera de la zona de fade, cancelar el track secundario.
+- Caso E: Duración del Track menor que el tiempo de Crossfade configurado.
+  * Solución requerida: Clampar dinámicamente el tiempo de crossfade al 50% de la duración total de la canción corta para evitar que la canción comience y termine en fade permanente.
+- Caso F: Stop o Cierre de la aplicación durante el fade.
+  * Solución requerida: Limpieza inmediata de memoria y parada segura de los hilos de audio para evitar accesos a memoria liberada (use-after-free) o desbordamientos de buffer.
+
+Sincronización con el Visualizador y UI:
+- La barra de progreso de la UI debe cambiar al nuevo track en el momento exacto en que el volumen del nuevo track supera el 50% (o al inicio del fade, según el estándar del reproductor).
+- Las portadas y metadatos mostrados deben actualizarse en sincronía con el cambio primario de track.
+
+Resultado Esperado: Módulos de código y lógica de máquina de estados (State Machine) para el reproductor que gestionen el Crossfade de forma fluida, tolerante a fallos y sin colapsar el pipeline de audio ante ninguna acción repentina del usuario.

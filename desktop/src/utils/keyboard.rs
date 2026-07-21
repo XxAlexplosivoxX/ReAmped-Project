@@ -18,8 +18,10 @@ pub fn handle_keyboard_input(
     keybindings: &KeyBindings,
     is_playing: bool,
 ) -> Option<PlayerCommand> {
+    if ctx.memory(|mem| mem.focused().is_some()) {
+        return None;
+    }
     ctx.input(|input| {
-        // Check events for key press
         for event in &input.events {
             match event {
                 egui::Event::Key {
