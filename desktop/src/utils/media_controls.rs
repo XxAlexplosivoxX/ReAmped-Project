@@ -3,7 +3,7 @@ mod linux {
     use async_channel::{Sender, unbounded};
     use async_std::task;
     use mpris_server::{Metadata as MprisMetadata, PlaybackStatus, Player as MprisPlayer, Time};
-    use player_core::{Player as CorePlayer, PlayerCommand, track::Track};
+    use player_core::{Player as CorePlayer, PlayerCommand, Track};
     use std::{sync::{Arc, Mutex}, thread};
 
     #[derive(Clone, Debug, PartialEq)]
@@ -143,7 +143,7 @@ mod linux {
 
 #[cfg(not(target_os = "linux"))]
 mod fallback {
-    use player_core::track::Track;
+    use player_core::Track;
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct MediaSnapshot {

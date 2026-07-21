@@ -2,10 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::utils::cache::{CacheEntry, TrackCache};
-use player_core::{metadata::read_metadata, track::Track};
+use player_core::{metadata::read_metadata, Track};
 use walkdir::WalkDir;
 
-const AUDIO_EXTS: &[&str] = &["mp3", "mpa", "m1a", "m2a", "aac", "adts", "m4a", "m4b", "m4p", "m4r", "mp4", "3gp", "3g2", "mov", "qt", "wav", "wave", "aif", "aiff", "aifc", "caf", "flac", "ogg", "oga", "opus", "spx", "vorbis", "ape", "tak", "wv", "mka", "mkv", "webm", "ac3", "ec3", "dts", "amr", "awb", "mpc", "mpc8", "alac"];
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "mpa", "m4a", "m4b", "m4r", "mp4",
+    "wav", "wave", "aif", "aiff", "aifc", "caf",
+    "flac", "ogg", "oga", "vorbis",
+    "mka", "mkv", "webm", "alac",
+];
 
 fn fallback_track_info(path: &Path) -> (String, String, f32) {
     let title = path

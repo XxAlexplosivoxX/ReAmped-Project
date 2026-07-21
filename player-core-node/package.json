@@ -1,0 +1,21 @@
+{
+  "name": "player-core-node",
+  "version": "0.1.0",
+  "description": "Node.js bindings for player-core, a pure-Rust audio playback engine",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "napi build --release --platform",
+    "build:debug": "napi build --platform",
+    "test": "node --test __test__/index.spec.js"
+  },
+  "napi": {
+    "name": "player-core-node",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2"
+  }
+}

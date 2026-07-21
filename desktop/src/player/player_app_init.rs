@@ -1,8 +1,7 @@
 use std::{collections::HashSet, sync::{Arc, Mutex}, thread, time::Duration};
 use egui::Color32;
 use player_core::{
-    Player, PlayerCommand, Track,
-    player::Options,
+    Player, PlayerBuilder, PlayerCommand, Track, Options,
 };
 use crate::{utils::{load_cover::load_cover_texture, media_controls::{MediaControls, MediaSnapshot}, misc::extract_palette, luminance::luminance, scan_music_dirs::scan_music_dirs, visualizer::SpectrumVisualizer}};
 use player_core::config::{AppConfig, load_config};
@@ -51,7 +50,7 @@ impl PlayerApp {
         let config_values = load_config();
         let config = Arc::new(Mutex::new(config_values.clone()));
         let visualizer = SpectrumVisualizer::new(config.clone());
-        let player = Player::new(config_values.volume);
+        let player = PlayerBuilder::new().with_volume(config_values.volume).build();
         let media_controls = MediaControls::start(player.clone());
 
         let app = Self {
@@ -108,19 +107,17 @@ impl PlayerApp {
 
         thread::spawn(move || {
             loop {
-                let state = player.state.lock().unwrap();
-                let playlist = state.playlist.clone();
-                let playlist_idx = state.playlist_idx;
+                let playlist = player.playlist();
+                let playlist_idx = player.playlist_idx();
                 let current_track = playlist.get(playlist_idx).cloned();
 
                 media_controls.sync_from_snapshot(MediaSnapshot {
                     current_track,
-                    playing: state.playing,
+                    playing: player.is_playing(),
                     playlist_len: playlist.len(),
                     playlist_idx,
                 });
 
-                drop(state);
                 thread::sleep(Duration::from_millis(150));
             }
         });
@@ -132,13 +129,9 @@ impl PlayerApp {
             let pl = self.player.playlist();
             let idx = self.player.playlist_idx();
 
-            // Only expose a "current track" to the UI if the backend
-            // actually has something loaded (duration > 0), metadata is
-            // present, or the player is playing. This avoids showing the
-            // first playlist entry selected/paused before any backend load.
-            let state = self.player.state.lock().unwrap();
-            let has_loaded = state.duration > 0.0 || state.metadata.is_some() || state.playing;
-            drop(state);
+            let has_loaded = self.player.duration() > 0.0
+                || self.player.metadata().is_some()
+                || self.player.is_playing();
 
             if has_loaded && !pl.is_empty() {
                 Some(pl[idx].clone())
@@ -219,7 +212,7 @@ impl PlayerApp {
 
     pub fn load_library_async(&self) {
         let cfg = self.config.lock().unwrap();
-        let sender = self.player.clone();
+        let player = self.player.clone();
         let dirs = cfg.music_dirs.clone();
         let sort_option = self.sort_option.clone();
         let startup_tracks = self.startup_tracks.clone();
@@ -245,9 +238,9 @@ impl PlayerApp {
 
             if has_tracks {
                 if should_autoplay {
-                    sender.send(PlayerCommand::SetPlaylistAndPlayIndex(tracks, 0));
+                    player.send(PlayerCommand::SetPlaylistAndPlayIndex(tracks, 0));
                 } else {
-                    sender.send(PlayerCommand::SetPlaylist(tracks));
+                    player.send(PlayerCommand::SetPlaylist(tracks));
                 }
             }
         });

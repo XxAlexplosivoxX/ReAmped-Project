@@ -1,11 +1,11 @@
 use egui::{
     Color32, Painter, Pos2, Rect, Shape, Stroke,
     epaint::{Mesh, Vertex},
-    pos2,
 };
 use player_core::audio::viz_source::SharedSamples;
 use player_core::config::AppConfig;
 use player_core::viz::spectrum::{log_frequency_bands, smooth_spatial, spectrum};
+use player_core::viz::waveform::OscilloscopeFrame;
 use std::sync::{Arc, Mutex};
 
 use crate::{dsp_ui::db_meter::calculate_db};
@@ -15,7 +15,10 @@ pub struct SpectrumVisualizer {
     state: SpectrumState,
     config: Arc<Mutex<AppConfig>>,
     stripes: BeatStripe,
-    pub loudness: f32
+    pub loudness: f32,
+    pub last_period: f32,
+    tooltip: TooltipColors,
+    last_palette_hash: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,7 @@ pub struct BeatStripe {
 impl SpectrumVisualizer {
     pub fn new(config: Arc<Mutex<AppConfig>>) -> Self {
         let bars = config.lock().unwrap().spectrum_bars_quantity;
+        let default_palette = [[36, 36, 36], [140, 140, 140], [209, 209, 209]];
 
         Self {
             state: SpectrumState {
@@ -48,7 +52,20 @@ impl SpectrumVisualizer {
                 intensity: 0.0,
             },
             config,
-            loudness: -100.0
+            loudness: -100.0,
+            last_period: 0.0,
+            tooltip: TooltipColors::from_palette(&default_palette),
+            last_palette_hash: 0,
+        }
+    }
+
+    pub fn update_palette(&mut self, palette: &[[u8; 3]]) {
+        let hash = palette
+            .iter()
+            .fold(0u64, |h, c| h.wrapping_mul(31).wrapping_add(c[0] as u64 ^ ((c[1] as u64) << 8) ^ ((c[2] as u64) << 16)));
+        if hash != self.last_palette_hash {
+            self.tooltip = TooltipColors::from_palette(palette);
+            self.last_palette_hash = hash;
         }
     }
 
@@ -56,10 +73,11 @@ impl SpectrumVisualizer {
         &mut self,
         ui: &mut egui::Ui,
         samples: &SharedSamples,
-        r: u8,
-        g: u8,
-        b: u8,
+        palette: &[[u8; 3]],
     ) {
+        self.update_palette(palette);
+        let (r, g, b) = (palette[0][0], palette[0][1], palette[0][2]);
+
         let (bands_quantity, smooth_enabled, fft_size, spectrum_mode_line, old_style) = {
             let cfg = self.config.lock().unwrap();
             (
@@ -89,11 +107,17 @@ impl SpectrumVisualizer {
         let target_db = calculate_db(&raw);
         self.loudness = egui::lerp(self.loudness..=target_db, 0.2);
         self.stripes.intensity = energy_all_freq(&self.state.smooth);
+
+        let size = egui::vec2(ui.available_width(), ui.available_height());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect).with_clip_rect(rect);
+
+        painter.rect_filled(rect, 6.0, Color32::TRANSPARENT);
+
         if old_style {
             let mut bands =
-                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, 20.0, 8_000.0);
+                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
 
-            // --- suavizado ---
             let alpha = 0.65;
             if smooth_enabled {
                 bands = smooth_spatial(&bands);
@@ -114,12 +138,7 @@ impl SpectrumVisualizer {
                 self.state.max_energy =
                     self.state.max_energy * (1.0 - release) + frame_max * release;
             }
-            let size = egui::vec2(ui.available_width(), ui.available_height());
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
 
-            let painter = ui.painter_at(rect).with_clip_rect(rect);
-
-            painter.rect_filled(rect, 6.0, Color32::TRANSPARENT);
             let bars = self.state.smooth.len();
             let bar_width = rect.width() / bars as f32;
 
@@ -152,7 +171,7 @@ impl SpectrumVisualizer {
             }
         } else {
             let mut bands =
-                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, 20.0, 8000.0);
+                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
 
             let alpha = 0.65;
             if smooth_enabled {
@@ -174,13 +193,6 @@ impl SpectrumVisualizer {
                 self.state.max_energy =
                     self.state.max_energy * (1.0 - release) + frame_max * release;
             }
-
-            let size = egui::vec2(ui.available_width(), ui.available_height());
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-
-            let painter = ui.painter_at(rect).with_clip_rect(rect);
-
-            painter.rect_filled(rect, 6.0, Color32::TRANSPARENT);
 
             let bars = self.state.smooth.len();
             let bar_width = rect.width() / bars as f32;
@@ -220,63 +232,149 @@ impl SpectrumVisualizer {
                         egui::Stroke::NONE,
                     ));
                 }
+            } else {
+                let mut mesh = Mesh::default();
+                for (i, v) in self.state.smooth.iter().enumerate() {
+                    let norm = v / self.state.max_energy.max(1e-6);
+                    let t = norm.clamp(0.0, 1.0);
 
-                return;
+                    let h = (t.powf(0.7) * rect.height()).max(min_h);
+
+                    let x0 = rect.left() + i as f32 * bar_width;
+                    let x1 = x0 + bar_width;
+
+                    let y0 = rect.bottom();
+                    let y1 = rect.bottom() - h;
+
+                    let color = lerp_color(base_color, peak_color, t);
+
+                    let base = mesh.vertices.len() as u32;
+
+                    mesh.vertices.push(Vertex {
+                        pos: Pos2::new(x0, y0),
+                        uv: Default::default(),
+                        color,
+                    });
+
+                    mesh.vertices.push(Vertex {
+                        pos: Pos2::new(x1, y0),
+                        uv: Default::default(),
+                        color,
+                    });
+
+                    mesh.vertices.push(Vertex {
+                        pos: Pos2::new(x1, y1),
+                        uv: Default::default(),
+                        color,
+                    });
+
+                    mesh.vertices.push(Vertex {
+                        pos: Pos2::new(x0, y1),
+                        uv: Default::default(),
+                        color,
+                    });
+
+                    mesh.indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
+                }
+
+                painter.add(Shape::mesh(mesh));
             }
-
-            let mut mesh = Mesh::default();
-            for (i, v) in self.state.smooth.iter().enumerate() {
-                let norm = v / self.state.max_energy.max(1e-6);
-                let t = norm.clamp(0.0, 1.0);
-
-                let h = (t.powf(0.7) * rect.height()).max(min_h);
-
-                let x0 = rect.left() + i as f32 * bar_width;
-                let x1 = x0 + bar_width;
-
-                let y0 = rect.bottom();
-                let y1 = rect.bottom() - h;
-
-                let color = lerp_color(base_color, peak_color, t);
-
-                let base = mesh.vertices.len() as u32;
-
-                mesh.vertices.push(Vertex {
-                    pos: Pos2::new(x0, y0),
-                    uv: Default::default(),
-                    color,
-                });
-
-                mesh.vertices.push(Vertex {
-                    pos: Pos2::new(x1, y0),
-                    uv: Default::default(),
-                    color,
-                });
-
-                mesh.vertices.push(Vertex {
-                    pos: Pos2::new(x1, y1),
-                    uv: Default::default(),
-                    color,
-                });
-
-                mesh.vertices.push(Vertex {
-                    pos: Pos2::new(x0, y1),
-                    uv: Default::default(),
-                    color,
-                });
-
-                mesh.indices.extend_from_slice(&[
-                    base,
-                    base + 1,
-                    base + 2,
-                    base,
-                    base + 2,
-                    base + 3,
-                ]);
-            }
-
-            painter.add(Shape::mesh(mesh));
         }
+
+        let sample_rate = 44100.0;
+
+        for &freq in GRID_FREQS {
+            let t = freq_to_x_frac(freq);
+            let x = rect.left() + t * rect.width();
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                Stroke::new(1.0, self.tooltip.grid_line),
+            );
+            let label = if freq >= 1000.0 {
+                format!("{}k", freq as u32 / 1000)
+            } else {
+                format!("{}", freq as u32)
+            };
+            painter.text(
+                Pos2::new(x - 4.0, rect.top() + 2.0),
+                egui::Align2::RIGHT_TOP,
+                label,
+                egui::FontId::proportional(9.0),
+                self.tooltip.grid_text,
+            );
+        }
+
+        if response.hovered() {
+            self.draw_spectrum_hover(&painter, rect, &raw, fft_size, sample_rate, response);
+        }
+    }
+
+    fn draw_spectrum_hover(
+        &self,
+        painter: &Painter,
+        rect: Rect,
+        raw: &[f32],
+        fft_size: usize,
+        sample_rate: f32,
+        response: egui::Response,
+    ) {
+        let cursor_pos = match response.hover_pos() {
+            Some(p) if rect.contains(p) => p,
+            _ => return,
+        };
+
+        painter.line_segment(
+            [
+                Pos2::new(cursor_pos.x, rect.top()),
+                Pos2::new(cursor_pos.x, rect.bottom()),
+            ],
+            Stroke::new(1.0, self.tooltip.cursor),
+        );
+
+        let t = ((cursor_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let freq = x_frac_to_freq(t);
+        let bin = freq_to_bin(freq, sample_rate, fft_size);
+        let amp = if bin < raw.len() {
+            ln_mag_to_db(raw[bin])
+        } else {
+            -100.0
+        };
+        let note = freq_to_note(freq);
+        let text = format!("{:.2}dB  {}  {}", amp, format_freq(freq), note);
+
+        let font = egui::FontId::proportional(10.0);
+        let pad = 6.0;
+        let panel_h = 20.0;
+        let panel_w = (text.len() as f32 * 6.5 + pad * 2.0).min(260.0);
+
+        let mut px = cursor_pos.x + 12.0;
+        let mut py = cursor_pos.y - panel_h - 8.0;
+        if px + panel_w > rect.right() {
+            px = cursor_pos.x - panel_w - 12.0;
+        }
+        if py < rect.top() + 4.0 {
+            py = cursor_pos.y + 12.0;
+        }
+        px = px.max(rect.left() + 2.0);
+        py = py.max(rect.top() + 2.0);
+
+        let panel_rect = Rect::from_min_size(Pos2::new(px, py), egui::vec2(panel_w, panel_h));
+        painter.rect_filled(panel_rect, 4.0, self.tooltip.bg);
+        painter.rect_stroke(panel_rect, 4.0, Stroke::new(1.0, self.tooltip.border), egui::StrokeKind::Outside);
+        painter.text(
+            Pos2::new(px + pad, py + (panel_h - 14.0) * 0.5),
+            egui::Align2::LEFT_CENTER,
+            &text,
+            font,
+            self.tooltip.text,
+        );
     }
 
     pub fn draw_beat_stripes(&mut self, ui: &mut egui::Ui, color_1: Color32, color_2: Color32) {
@@ -388,39 +486,204 @@ pub fn _draw_waveform(ui: &mut egui::Ui, samples: &[f32], color: egui::Color32) 
 pub fn draw_waveform_raw(
     painter: &Painter,
     rect: Rect,
-    samples: &[f32],
+    frame: &OscilloscopeFrame,
     color: Color32,
-    fg_color: Color32,
+    bg_color: Color32,
 ) {
-    painter.rect_filled(rect, 6.0, fg_color);
+    if bg_color != Color32::TRANSPARENT {
+        painter.rect_filled(rect, 6.0, bg_color);
+    }
+
     let w = rect.width();
     let h = rect.height();
     let center_y = rect.center().y;
+    let slice = &frame.samples;
+    let v_len = slice.len();
 
-    let len = samples.len().max(1);
-    if len < 2 {
+    if v_len < 2 {
         return;
     }
 
-    let step_x = w / (len - 1) as f32;
+    let step_x = w / (v_len - 1) as f32;
+    let padding = h * 0.1;
+    let amp = (h * 0.5) - padding;
 
-    let padding = h * 0.15;
-    let amp = (h * 0.6) - padding;
+    let (r, g, b, _) = (color.r(), color.g(), color.b(), color.a());
+    let center_alpha: u8 = 35;
 
-    let mut last: Option<egui::Pos2> = None;
-    for (i, &s) in samples.iter().enumerate() {
+    let mut mesh = Mesh::default();
+
+    for i in 0..v_len - 1 {
+        let s1 = slice[i].clamp(-1.0, 1.0);
+        let s2 = slice[i + 1].clamp(-1.0, 1.0);
+        let x1 = rect.left() + i as f32 * step_x;
+        let x2 = rect.left() + (i + 1) as f32 * step_x;
+        let y1 = center_y - s1 * amp;
+        let y2 = center_y - s2 * amp;
+
+        let d1 = ((y1 - center_y).abs() / (h * 0.5)).min(1.0);
+        let d2 = ((y2 - center_y).abs() / (h * 0.5)).min(1.0);
+
+        let a1 = (center_alpha as f32 * (1.0 - d1)) as u8;
+        let a2 = (center_alpha as f32 * (1.0 - d2)) as u8;
+
+        let c_edge1 = Color32::from_rgba_unmultiplied(r, g, b, a1);
+        let c_edge2 = Color32::from_rgba_unmultiplied(r, g, b, a2);
+        let c_center = Color32::from_rgba_unmultiplied(r, g, b, center_alpha);
+
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend([
+            Vertex {
+                pos: Pos2::new(x1, y1),
+                uv: Default::default(),
+                color: c_edge1,
+            },
+            Vertex {
+                pos: Pos2::new(x2, y2),
+                uv: Default::default(),
+                color: c_edge2,
+            },
+            Vertex {
+                pos: Pos2::new(x2, center_y),
+                uv: Default::default(),
+                color: c_center,
+            },
+            Vertex {
+                pos: Pos2::new(x1, center_y),
+                uv: Default::default(),
+                color: c_center,
+            },
+        ]);
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    painter.add(Shape::mesh(mesh));
+
+    let mut points: Vec<Pos2> = Vec::with_capacity(v_len);
+    for (i, &s) in slice.iter().enumerate() {
         let x = rect.left() + i as f32 * step_x;
+        let y = center_y - (s.clamp(-1.0, 1.0) * amp);
+        points.push(Pos2::new(x, y));
+    }
 
-        let s = s.clamp(-1.0, 1.0);
+    painter.add(Shape::line(points, Stroke::new(1.2, color)));
+}
 
-        let y = center_y - s * amp;
-        let p = pos2(x, y);
+const SPECTRUM_F_MIN: f32 = 20.0;
+const SPECTRUM_F_MAX: f32 = 20000.0;
+const GRID_FREQS: &[f32] = &[100.0, 500.0, 1000.0, 5000.0, 10000.0, 20000.0];
 
-        if let Some(prev) = last {
-            painter.line_segment([prev, p], Stroke::new(1.0, color));
+fn freq_to_note(freq: f32) -> String {
+    if freq <= 0.0 {
+        return "---".into();
+    }
+    let midi = 12.0 * (freq / 440.0).log2() + 69.0;
+    let midi_r = midi.round();
+    let note_idx = ((midi_r as i32).rem_euclid(12)) as usize;
+    let octave = (midi_r as i32) / 12 - 1;
+    let cents = ((midi - midi_r) * 100.0).round() as i32;
+    const NAMES: [&str; 12] =
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    if cents == 0 {
+        format!("{}{}", NAMES[note_idx], octave)
+    } else {
+        format!("{}{} {:+.0}c", NAMES[note_idx], octave, cents)
+    }
+}
+
+fn format_freq(freq: f32) -> String {
+    if freq >= 1000.0 {
+        format!("{:.2} kHz", freq / 1000.0)
+    } else {
+        format!("{:.2} Hz", freq)
+    }
+}
+
+fn ln_mag_to_db(ln_val: f32) -> f32 {
+    20.0 * ln_val / std::f32::consts::LN_10
+}
+
+fn relative_luminance(c: [u8; 3]) -> f32 {
+    fn linearize(v: u8) -> f32 {
+        let s = v as f32 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
         }
+    }
+    0.2126 * linearize(c[0]) + 0.7152 * linearize(c[1]) + 0.0722 * linearize(c[2])
+}
 
-        last = Some(p);
+fn freq_to_x_frac(freq: f32) -> f32 {
+    (freq.ln() - SPECTRUM_F_MIN.ln()) / (SPECTRUM_F_MAX.ln() - SPECTRUM_F_MIN.ln())
+}
+
+fn x_frac_to_freq(t: f32) -> f32 {
+    (SPECTRUM_F_MIN.ln() + t * (SPECTRUM_F_MAX.ln() - SPECTRUM_F_MIN.ln())).exp()
+}
+
+fn freq_to_bin(freq: f32, sample_rate: f32, fft_size: usize) -> usize {
+    ((freq / sample_rate) * fft_size as f32).round() as usize
+}
+
+#[derive(Clone, Debug)]
+pub struct TooltipColors {
+    pub bg: Color32,
+    pub text: Color32,
+    pub border: Color32,
+    pub grid_line: Color32,
+    pub grid_text: Color32,
+    pub cursor: Color32,
+}
+
+impl TooltipColors {
+    pub fn from_palette(palette: &[[u8; 3]]) -> Self {
+        let bg_lum = relative_luminance(palette[2]);
+        let is_light = bg_lum > 0.5;
+
+        let (bg, text) = if is_light {
+            let c = palette[0];
+            (Color32::from_rgb(c[0], c[1], c[2]), Color32::WHITE)
+        } else {
+            let bg_c = palette[2];
+            let tc = palette[0];
+            (
+                Color32::from_rgb(
+                    bg_c[0].max(80),
+                    bg_c[1].max(80),
+                    bg_c[2].max(80),
+                ),
+                Color32::from_rgb(tc[0].max(30), tc[1].max(30), tc[2].max(30)),
+            )
+        };
+
+        let accent = Color32::from_rgb(palette[1][0], palette[1][1], palette[1][2]);
+
+        Self {
+            bg,
+            text,
+            border: accent.linear_multiply(0.7),
+            grid_line: Color32::from_rgba_unmultiplied(
+                palette[0][0],
+                palette[0][1],
+                palette[0][2],
+                51,
+            ),
+            grid_text: Color32::from_rgba_unmultiplied(
+                palette[0][0],
+                palette[0][1],
+                palette[0][2],
+                102,
+            ),
+            cursor: Color32::from_rgba_unmultiplied(
+                palette[1][0],
+                palette[1][1],
+                palette[1][2],
+                102,
+            ),
+        }
     }
 }
 

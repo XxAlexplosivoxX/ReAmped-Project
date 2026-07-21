@@ -1,5 +1,5 @@
 use egui::{Color32, Ui};
-use player_core::{PlayerCommand, player::Options};
+use player_core::{PlayerCommand, Options};
 use crate::{PlayerApp};
 
 pub fn show_order_buttons(ui: &mut Ui, player: &mut PlayerApp, _accent: Color32, _text_color: Color32) {

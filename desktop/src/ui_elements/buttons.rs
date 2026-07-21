@@ -5,7 +5,7 @@ use crate::{PlayerApp, utils::marquee_text::show_marquee_text};
 pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut PlayerApp, text_color: Color32, accent: Color32) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            let metadata = player_app.player.state.lock().unwrap().metadata.clone();
+            let metadata = player_app.player.metadata();
             if let Some(metadata) = metadata {
                 let text = format!("\"{}\" By: {}", metadata.title, metadata.artist);
                 show_marquee_text(ui, &text, 40.0, text_color.clone());
@@ -18,14 +18,10 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 );
             }
             ui.horizontal(|ui| {
-                let state = player_app.player.state.lock().unwrap();
-
-                let shuffle_on = state.shuffle;
-                let repeat_on = state.repeat;
-                let repeat_one_on = state.repeat_one;
-                let play_on = state.playing;
-
-                drop(state);
+                let shuffle_on = player_app.player.shuffle();
+                let repeat_on = player_app.player.repeat();
+                let repeat_one_on = player_app.player.repeat_one();
+                let play_on = player_app.player.is_playing();
 
                 if ui.add(egui::Button::new("⏮")).clicked() {
                     let old_idx = player_app.player.playlist_idx();

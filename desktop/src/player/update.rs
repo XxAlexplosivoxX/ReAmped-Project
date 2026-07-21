@@ -1,5 +1,5 @@
 use egui::{Color32, style::HandleShape};
-use player_core::{PlayerCommand, viz::waveform::waveform};
+use player_core::{PlayerCommand, viz::waveform::synchronized_waveform};
 use std::time::Duration;
 
 use crate::{
@@ -100,15 +100,13 @@ impl eframe::App for PlayerApp {
                                 });
                                 ui.vertical(|ui| {
                                     show_search_and_miniplaylist(ui, self, accent);
-                                    let samples = &self.player.samples;
+                                    let samples = self.player.samples();
                                     let palette = &self.palette_sorted;
 
                                     self.visualizer.draw_spectrum(
                                         ui,
                                         samples,
-                                        palette[0][0],
-                                        palette[0][1],
-                                        palette[0][2],
+                                        palette,
                                     );
                                 });
                             });
@@ -117,7 +115,7 @@ impl eframe::App for PlayerApp {
                 });
             });
             ui.horizontal(|ui| {
-                let mut duration = self.player.state.lock().unwrap().duration;
+                let mut duration = self.player.duration();
 
                 let available = ui.available_width() - 76.0 - 16.0;
 
@@ -174,8 +172,13 @@ impl eframe::App for PlayerApp {
             );
 
             let painter = ui.painter_at(rect).with_clip_rect(rect);
-            let samples = self.player.samples.clone();
-            let wave = waveform(samples, 4108);
+            let samples = self.player.samples().clone();
+            let wave = synchronized_waveform(
+                samples,
+                4096,
+                self.player.get_sample_rate(),
+                &mut self.visualizer.last_period,
+            );
             let palette = &self.palette_sorted;
 
             draw_waveform_raw(

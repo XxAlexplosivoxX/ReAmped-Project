@@ -1,9 +1,0 @@
-reamped (1.0.0-1) unstable; urgency=medium
-
-  * Initial release
-  * Music player with multi-format support
-  * MPRIS D-Bus integration
-  * Metadata caching
-  * Optimized CPU usage
-
- -- ReAmped Developer <dev@reamped.local>  Sat, 17 May 2026 00:00:00 +0000

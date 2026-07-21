@@ -350,12 +350,28 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             ui.separator();
 
                             if ui
-                                .add(
-                                    egui::Slider::new(&mut cfg.crossfade_seconds, 0.0..=15.0)
-                                        .step_by(0.1)
-                                        .text("Duración del crossfade (segundos)"),
-                                )
-                                .drag_stopped()
+                                .checkbox(&mut cfg.crossfade_enabled, "Transición suave (crossfade)")
+                                .changed()
+                            {
+                                save_config(&cfg);
+                            }
+
+                            if cfg.crossfade_enabled {
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut cfg.crossfade_seconds, 1.0..=30.0)
+                                            .step_by(0.5)
+                                            .text("Duración (segundos)"),
+                                    )
+                                    .drag_stopped()
+                                {
+                                    save_config(&cfg);
+                                }
+                            }
+
+                            if ui
+                                .checkbox(&mut cfg.silence_trim_enabled, "Recortar silencio inicial/final")
+                                .changed()
                             {
                                 save_config(&cfg);
                             }

@@ -3,19 +3,29 @@ use std::sync::{Arc, Mutex};
 
 pub fn spectrum(samples: Arc<Mutex<Vec<f32>>>, size: usize) -> Vec<f32> {
     let buf = samples.lock().unwrap();
+    let frame_count = buf.len() / 2;
 
-    if buf.len() < size {
+    if frame_count < 2 {
         return vec![0.0; size / 2];
     }
 
-    let mut input: Vec<Complex<f32>> = buf
+    let take = size.min(frame_count);
+    let skip = frame_count - take;
+
+    let mut mono = Vec::with_capacity(size);
+    for i in 0..take {
+        let idx = (skip + i) * 2;
+        let l = buf[idx];
+        let r = buf[idx + 1];
+        mono.push((l + r) * 0.5);
+    }
+    mono.resize(size, 0.0);
+    drop(buf);
+
+    let mut input: Vec<Complex<f32>> = mono
         .iter()
-        .rev()
-        .take(size)
-        .rev()
         .enumerate()
         .map(|(i, &s)| {
-            // ventana Hann
             let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / size as f32).cos());
             Complex {
                 re: s * w,
@@ -32,7 +42,6 @@ pub fn spectrum(samples: Arc<Mutex<Vec<f32>>>, size: usize) -> Vec<f32> {
         .iter()
         .map(|c| {
             let mag = c.norm();
-            // compresión log
             (mag + 1e-6).ln()
         })
         .collect()
