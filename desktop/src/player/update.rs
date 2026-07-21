@@ -1,3 +1,54 @@
+//! Per‑frame update loop (`eframe::App::update`).
+//!
+//! # Layout overview
+//!
+//! The [`update`](eframe::App::update) method paints everything inside an
+//! [`egui::CentralPanel`] whose background is a slanted vertical gradient
+//! (see [`draw_slanted_vertical_gradient`]).  Sub‑components are called as
+//! plain functions — there are no nested widget structs.
+//!
+//! The layout is roughly:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────┐
+//! │  Album art  │  Buttons & title              │
+//! │  (cover)    │  ┌──────────┬──────────────┐  │
+//! │             │  │ Volume   │ Order btns   │  │
+//! │             │  │ bar      │ & expander   │  │
+//! │             │  ├──────────┴──────────────┤  │
+//! │             │  │ VU meters │ Search +    │  │
+//! │             │  │           │ miniplaylist│  │
+//! │             │  │           │ Spectrum    │  │
+//! │             │  └──────────┴──────────────┘  │
+//! ├─────────────────────────────────────────────┤
+//! │             Seek slider                     │
+//! ├─────────────────────────────────────────────┤
+//! │         Waveform / beat stripes             │
+//! └─────────────────────────────────────────────┘
+//! ```
+//!
+//! # Repaint scheduling
+//!
+//! Every frame calls
+//! `ctx.request_repaint_after(Duration::from_millis(16))` — both when playing
+//! and when paused — to keep the UI updating at roughly 60 fps.  The waveform,
+//! spectrum, and position slider all rely on this steady tick.
+//!
+//! # Data flow
+//!
+//! * **Player state** — `self.player.position()`, `.is_playing()`,
+//!   `.duration()`, `.samples()`, `.get_loudness()` are polled every frame.
+//! * **Shared samples** — `self.player.samples()` returns an `Arc` behind
+//!   which lives a lock‑free ring buffer written by the audio thread and read
+//!   by the UI thread.  Both the spectrum visualiser and the waveform
+//!   visualiser consume this buffer.
+//! * **Keyboard input** — [`handle_keyboard_input`] reads the current egui
+//!   input state and translates it to a [`PlayerCommand`] according to the
+//!   user's configured keybindings.
+//! * **Library loading** — if the playlist is empty,
+//!   [`PlayerApp::load_library_async`] is
+//!   called to kick off a background scan.
+
 use egui::{Color32, style::HandleShape};
 use player_core::{PlayerCommand, viz::waveform::synchronized_waveform};
 use std::time::Duration;
@@ -17,6 +68,23 @@ use crate::{
 };
 
 impl eframe::App for PlayerApp {
+    /// Called by eframe every time the window needs repainting.
+    ///
+    /// This method:
+    /// 1. Adjusts [`pixels_per_point`](egui::Context::set_pixels_per_point) so
+    ///    that the UI scales with the physical viewport width.
+    /// 2. Calls [`ensure_cover_loaded`](PlayerApp::ensure_cover_loaded) to
+    ///    update the colour theme if the track changed.
+    /// 3. Draws the slanted‑gradient background via
+    ///    [`draw_slanted_vertical_gradient`].
+    /// 4. Lays out all sub‑components (cover, buttons, volume bar, order
+    ///    buttons, EQ, VU meters, search + mini‑playlist, spectrum visualiser).
+    /// 5. Renders a seek slider that polls the core position and sends
+    ///    [`PlayerCommand::Seek`] on drag.
+    /// 6. Draws the synchronised waveform and beat stripes below the slider.
+    /// 7. Requests another repaint after 16 ms (~60 fps).
+    /// 8. If the playlist is empty, kicks off a background library scan.
+    /// 9. Handles keyboard shortcuts via [`handle_keyboard_input`].
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let palette = self.palette_sorted.clone();
         let panel =

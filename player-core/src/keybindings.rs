@@ -1,24 +1,44 @@
+//! Configurable keyboard-to-command mapping.
+//!
+//! Bindings are stored as `HashMap<String, String>` where keys are the
+//! string representation of [`KeyCode`] variants and values are command
+//! names (e.g. `"PlayPause"`, `"Next"`).  The mapping is serialised as
+//! part of [`AppConfig`](crate::config::AppConfig).
+
 use serde::{Serialize, Deserialize};
 use crate::PlayerCommand;
 use std::collections::HashMap;
 
+/// A keyboard key that can be bound to a player action.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum KeyCode {
+    /// Space bar.
     Space,
+    /// Enter / Return key.
     Enter,
+    /// Up arrow.
     ArrowUp,
+    /// Down arrow.
     ArrowDown,
+    /// Left arrow.
     ArrowLeft,
+    /// Right arrow.
     ArrowRight,
+    /// The `N` key.
     KeyN,
+    /// The `P` key.
     KeyP,
+    /// The `M` key.
     KeyM,
+    /// The `R` key.
     KeyR,
+    /// The `S` key.
     KeyS,
 }
 
 impl KeyCode {
+    /// Returns the string representation used in the bindings map.
     pub fn to_string(&self) -> String {
         match self {
             KeyCode::Space => "Space".to_string(),
@@ -36,8 +56,23 @@ impl KeyCode {
     }
 }
 
+/// A mapping from keyboard keys to player commands.
+///
+/// The default bindings are:
+///
+/// | Key | Command |
+/// |-----|---------|
+/// | `Space`, `Enter` | `PlayPause` (toggle) |
+/// | `ArrowRight` | `Next` |
+/// | `ArrowLeft` | `Previous` |
+/// | `M` | `Shuffle` |
+/// | `R` | `Repeat` |
+/// | `S` | `Stop` |
+/// | `N` | `Play` |
+/// | `P` | `Pause` |
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KeyBindings {
+    /// Internal map of key string → command name.
     pub bindings: HashMap<String, String>,
 }
 
@@ -59,6 +94,11 @@ impl Default for KeyBindings {
 }
 
 impl KeyBindings {
+    /// Looks up the [`PlayerCommand`] bound to `key`.
+    ///
+    /// Returns `None` when the key is unbound or when the binding maps to
+    /// the special `PlayPause` action (which must be handled separately via
+    /// [`is_play_pause_key`](Self::is_play_pause_key)).
     pub fn get_command(&self, key: &KeyCode) -> Option<PlayerCommand> {
         let key_str = key.to_string();
         let command_str = self.bindings.get(&key_str)?;
@@ -77,6 +117,11 @@ impl KeyBindings {
         }
     }
 
+    /// Returns `true` when `key` is bound to the `PlayPause` toggle action.
+    ///
+    /// This is a separate check because `PlayPause` does not map directly to
+    /// a [`PlayerCommand`] variant — the caller must determine the current
+    /// playback state and send either `Play` or `Pause` accordingly.
     pub fn is_play_pause_key(&self, key: &KeyCode) -> bool {
         let key_str = key.to_string();
         self.bindings.get(&key_str)

@@ -1,3 +1,57 @@
+//! Audio loop thread — playback engine, crossfade state machine, command dispatch.
+//!
+//! ## Architecture
+//!
+//! The engine runs a **single dedicated audio thread** spawned by
+//! [`spawn_audio_thread`]. This thread owns the
+//! [`SymphoniaBackend`] and
+//! an `mpsc::Receiver<PlayerCommand>`. All control (play, pause, skip, …)
+//! arrives as [`PlayerCommand`] values over the channel and is processed
+//! sequentially in [`audio_loop`].
+//!
+//! ```text
+//!   ┌──────────────┐   commands    ┌──────────────────┐
+//!   │  UI / CLI    │ ────────────▶ │  audio_loop()    │
+//!   │  (producer)  │               │  (consumer)      │
+//!   └──────────────┘               │  owns backend    │
+//!         │                        │  owns xfade FSM  │
+//!         │ events                 └────────┬─────────┘
+//!         ▼                                  │
+//!   ┌──────────────┐                        │
+//!   │  EventBus    │ ◀──────────────────────┘
+//!   │  subscribers │   StateChanged, TrackChanged, …
+//!   └──────────────┘
+//! ```
+//!
+//! Playback state is shared through `Arc<Mutex<PlayerState>>`, while audio
+//! samples and loudness values are pushed to atomics / shared buffers for
+//! lock-free reads in the UI or visualiser.
+//!
+//! ## Crossfade state machine
+//!
+//! The crossfade life cycle has four phases, defined by
+//! [`CrossfadePhase`]:
+//!
+//! | Phase | Meaning |
+//! |-------|---------|
+//! | `Idle` | No crossfade in progress. Normal playback. |
+//! | `Fading`  | Both current and next track are mixed by the audio callback. Gains are updated every `XFADE_UPDATE_MS` ms. |
+//! | `PausedFading` | User paused while a fade was active — gains are frozen so the crossfade can be resumed later. |
+//! | `Preparing` | Next track is being decoded into the ringbuffer (not used in the main loop directly). |
+//!
+//! The loop transitions are:
+//! ```text
+//!  Idle ──(trigger_pos reached)──▶ Fading ──(fade complete)──▶ Idle
+//!                                    │
+//!                                    │ pause
+//!                                    ▼
+//!                              PausedFading
+//!                                    │
+//!                                    │ play
+//!                                    ▼
+//!                                 Fading (resumed)
+//! ```
+
 use atomic_float::AtomicF32;
 use rand::rng;
 use rand::seq::SliceRandom;
@@ -17,16 +71,28 @@ use crate::config::load_config;
 use crate::dsp::silence_detector::detect_silence;
 use crate::metadata::{default_cover, read_metadata};
 
-/// How often to update crossfade gains from the player thread (in ms).
+/// Polling interval for the command channel while a crossfade is active (ms).
+///
+/// Every tick the loop updates the equal-power fade gains and checks for new
+/// commands. A shorter interval makes crossfade transitions smoother.
 const XFADE_UPDATE_MS: u64 = 15;
 
-/// Duration of the fast abort fade (ms).
+/// Duration of the fast "abort" fade applied when the user skips during a
+/// crossfade (ms). The outgoing track's gain is ramped to zero over this
+/// period before the new track starts.
 const ABORT_FADE_MS: u64 = 10;
 
 // ---------------------------------------------------------------------------
 // Helper: load a track into the backend
 // ---------------------------------------------------------------------------
 
+/// Load a track into the [`SymphoniaBackend`] and update [`PlayerState`].
+///
+/// This is called on explicit track changes (play, next, prev, jump, …) but
+/// *not* during crossfade completion (where the backend is already prepared).
+///
+/// It reads metadata and silence-trim settings, updates `backend` trim/load,
+/// and writes the new title, duration, cover, and position into `state`.
 fn load_track(
     backend: &mut SymphoniaBackend,
     track: &Track,
@@ -69,6 +135,11 @@ fn load_track(
 // Helper: resolve next index
 // ---------------------------------------------------------------------------
 
+/// Determine the next playlist index for gapless or crossfade pre-roll.
+///
+/// Respects `shuffle` (walks `shuffled_indices`), `repeat` (wraps around),
+/// and plain sequential order. Returns `None` when the playlist ends and
+/// repeat is off.
 fn resolve_next_index(
     current: usize,
     playlist: &[Track],
@@ -105,6 +176,18 @@ fn resolve_next_index(
 // Spawn
 // ---------------------------------------------------------------------------
 
+/// Entry-point: spawn the dedicated audio thread.
+///
+/// The thread runs [`audio_loop`] and owns the backend, the command receiver,
+/// and the crossfade state machine.
+///
+/// # Parameters
+///
+/// * `rx` — Command channel (consumer end).
+/// * `samples` — Shared sample buffer for the visualiser.
+/// * `state` — Shared playback state.
+/// * `db_l`, `db_r` — Atomic dB loudness values (left / right channel).
+/// * `event_bus` — Event broadcaster for UI subscribers.
 pub(crate) fn spawn_audio_thread(
     rx: Receiver<PlayerCommand>,
     samples: SharedSamples,
@@ -120,6 +203,22 @@ pub(crate) fn spawn_audio_thread(
 // Main audio loop
 // ---------------------------------------------------------------------------
 
+/// The core event loop running on the audio thread.
+///
+/// Each iteration:
+///
+/// 1. Updates crossfade gains (if [`CrossfadePhase::Fading`]).
+/// 2. Checks whether the current track has reached the crossfade trigger point
+///    and pre-rolls the next track.
+/// 3. Completes active crossfades (swaps backend to the next track).
+/// 4. Syncs the UI to the incoming track once its gain exceeds the outgoing
+///    gain (gain crossover at t > 0.5).
+/// 5. Detects natural track end (repeat-one, shuffle, repeat-all, or stop).
+/// 6. Updates position and loudness atomics.
+/// 7. Blocks on the command channel (`XFADE_UPDATE_MS` timeout) and dispatches.
+///
+/// The loop exits when the command sender is dropped (channel disconnect),
+/// publishing a final [`Event::Shutdown`].
 fn audio_loop(
     rx: Receiver<PlayerCommand>,
     samples: SharedSamples,
@@ -148,16 +247,33 @@ fn audio_loop(
 
         // ==================================================================
         // 1. Update crossfade gains (when fading)
+        //
+        // If the state machine is in [`CrossfadePhase::Fading`], compute the
+        // elapsed fraction and apply equal-power gain ramps to the backend so
+        // the audio callback mixes the outgoing and incoming tracks smoothly.
+        //
+        // The fade duration is re-read from the latest config on every
+        // iteration, so changes to `crossfade_seconds` in the settings take
+        // effect immediately — even on an active crossfade ("hot update").
         // ==================================================================
-        if let CrossfadePhase::Fading { fade_start, fade_dur_secs, .. } = &xfade_phase {
+        if let CrossfadePhase::Fading { fade_start, fade_dur_secs, .. } = &mut xfade_phase {
             let elapsed = fade_start.elapsed().as_secs_f32();
-            let t = (elapsed / fade_dur_secs).clamp(0.0, 1.0);
+            let cfg = load_config();
+            let hot = cfg.crossfade_seconds.max(0.5);
+            *fade_dur_secs = hot;
+            let t = (elapsed / *fade_dur_secs).clamp(0.0, 1.0);
             let (out, inn) = equal_power_gains(t);
             backend.set_crossfade_gains(out, inn);
         }
 
         // ==================================================================
         // 2. Crossfade pre-roll detection
+        //
+        // When the playhead reaches `effective_end - crossfade_seconds`,
+        // resolve the next track index, detect silence on the next track,
+        // prepare it in the backend, and transition the state machine to
+        // [`CrossfadePhase::Fading`]. The fade duration is clamped so it
+        // never exceeds half of either track's effective length.
         // ==================================================================
         if playing {
             let cfg = load_config();
@@ -211,6 +327,12 @@ fn audio_loop(
 
         // ==================================================================
         // 3. Crossfade completion
+        //
+        // Once the fade duration has elapsed (or the next track's decoder
+        // ringbuffer is depleted), swap the backend so the incoming track
+        // becomes the primary source. Update [`PlayerState`] with the new
+        // track's metadata and publish [`Event::TrackChanged`] if the UI
+        // hasn't already been switched (see section 4).
         // ==================================================================
         let need_swap = match &xfade_phase {
             CrossfadePhase::Fading { next_index, fade_start, fade_dur_secs, ui_switched, .. } => {
@@ -272,6 +394,11 @@ fn audio_loop(
 
         // ==================================================================
         // 4. UI sync at t > 0.5 (crossfade gain crossover)
+        //
+        // Once the incoming track's gain exceeds the outgoing track's gain
+        // (the "crossover point"), publish [`Event::TrackChanged`] and update
+        // [`PlayerState`] so the UI shows the next track. The state machine
+        // flag `ui_switched` ensures this only fires once per fade.
         // ==================================================================
         let ui_switch = match &xfade_phase {
             CrossfadePhase::Fading { next_index, ui_switched, .. } => {
@@ -326,6 +453,13 @@ fn audio_loop(
 
         // ==================================================================
         // 5. Normal track finish (only when no crossfade active)
+        //
+        // When the backend reports end-of-stream and the consumer ringbuffer
+        // is drained (and no crossfade is masking the transition), advance to
+        // the next track. Handles three sub-modes:
+        //   - repeat-one: reload the current track
+        //   - shuffle: walk shuffled_indices, reshuffle deck if repeat
+        //   - sequential: next index, wrap if repeat, else stop
         // ==================================================================
         if playing
             && !xfade_phase.is_active()
@@ -372,6 +506,11 @@ fn audio_loop(
 
         // ==================================================================
         // 6. Position + loudness update
+        //
+        // While playing, pull the instantaneous dB loudness from the backend
+        // into lock-free atomics (`db_l` / `db_r`) and update the shared
+        // position. When paused/stopped, write silence-level dB (-100) and
+        // sleep 16 ms to avoid busy-waiting.
         // ==================================================================
         if playing {
             let (l, r) = backend.get_db_loudness();
@@ -387,10 +526,15 @@ fn audio_loop(
 
         // ==================================================================
         // 7. Command handling
+        //
+        // Block for up to `XFADE_UPDATE_MS` on the command channel. When a
+        // command arrives, dispatch to the appropriate handler. On timeout
+        // simply loop. On disconnect (sender dropped), publish
+        // [`Event::Shutdown`] and break.
         // ==================================================================
         match rx.recv_timeout(Duration::from_millis(XFADE_UPDATE_MS)) {
             Ok(cmd) => match cmd {
-                // ---- Playlist ----
+                // ---- Replace playlist (no auto-play) ----
                 PlayerCommand::SetPlaylist(list) => {
                     playlist = list;
                     shuffled_indices = (0..playlist.len()).collect();
@@ -401,6 +545,10 @@ fn audio_loop(
                     event_bus.publish(Event::PlaylistChanged);
                 }
 
+                // ---- Play track at specific index ----
+                // Aborts any active crossfade, resets the backend, loads the
+                // target track immediately, and publishes both TrackChanged
+                // and StateChanged.
                 PlayerCommand::PlayIndex(index) => {
                     if index >= playlist.len() {
                         continue;
@@ -418,6 +566,9 @@ fn audio_loop(
                     event_bus.publish(Event::StateChanged);
                 }
 
+                // ---- Replace playlist and play from index ----
+                // Atomically replaces the playlist, resolves shuffle indices,
+                // and starts playback at the given position.
                 PlayerCommand::SetPlaylistAndPlayIndex(list, index) => {
                     playlist = list;
                     shuffled_indices = (0..playlist.len()).collect();
@@ -441,7 +592,10 @@ fn audio_loop(
                     }
                 }
 
-                // ---- Play / Pause ----
+                // ---- Resume playback ----
+                // If the crossfade was frozen in PausedFading, reconstruct
+                // the Fading phase by adjusting `fade_start` so the elapsed
+                // time is preserved. Then unpause the backend.
                 PlayerCommand::Play => {
                     if let CrossfadePhase::PausedFading { next_index, saved_out, saved_in, fade_dur_secs, elapsed_secs } = xfade_phase {
                         // Resume a frozen crossfade
@@ -460,6 +614,9 @@ fn audio_loop(
                     event_bus.publish(Event::StateChanged);
                 }
 
+                // ---- Pause playback ----
+                // Freeze crossfade gains into PausedFading so they can be
+                // restored exactly on resume. Then pause the backend.
                 PlayerCommand::Pause => {
                     // Freeze crossfade gains if active
                     if let CrossfadePhase::Fading { next_index, fade_start, fade_dur_secs, ui_switched: _ } = xfade_phase {
@@ -479,7 +636,10 @@ fn audio_loop(
                     event_bus.publish(Event::StateChanged);
                 }
 
-                // ---- Next / Prev ----
+                // ---- Skip to next track ----
+                // If a crossfade is active, fade out over ABORT_FADE_MS then
+                // abort. Resolve the next track respecting shuffle/repeat and
+                // load it. Publishes TrackChanged.
                 PlayerCommand::Next => {
                     if xfade_phase.is_active() {
                         backend.set_crossfade_gains(0.0, 1.0);
@@ -516,6 +676,10 @@ fn audio_loop(
                     event_bus.publish(Event::TrackChanged(current_index));
                 }
 
+                // ---- Go to previous track ----
+                // If > 3 s into the current track, restart it from 0.
+                // Otherwise move to the preceding playlist entry. Also
+                // aborts any active crossfade with a short fade-out.
                 PlayerCommand::Prev => {
                     if xfade_phase.is_active() {
                         backend.set_crossfade_gains(0.0, 1.0);
@@ -534,7 +698,9 @@ fn audio_loop(
                     }
                 }
 
-                // ---- Stop ----
+                // ---- Stop and reset ----
+                // Aborts crossfade, stops the backend, resets all state
+                // fields to defaults, and publishes StateChanged.
                 PlayerCommand::Stop => {
                     xfade_phase = CrossfadePhase::Idle;
                     backend.stop();
@@ -548,7 +714,9 @@ fn audio_loop(
                     event_bus.publish(Event::StateChanged);
                 }
 
-                // ---- Seek ----
+                // ---- Seek to time ----
+                // Aborts crossfade, seeks the backend to the given seconds,
+                // updates position, and ensures playing is true.
                 PlayerCommand::Seek(t) => {
                     xfade_phase = CrossfadePhase::Idle;
                     backend.seek(&playlist[current_index].path, t);
@@ -557,13 +725,17 @@ fn audio_loop(
                     s.playing = true;
                 }
 
-                // ---- Volume ----
+                // ---- Set volume ----
+                // Forwards the gain value to the backend and updates state.
                 PlayerCommand::SetVolume(v) => {
                     backend.set_volume(v);
                     state.lock().unwrap().volume = v;
                 }
 
-                // ---- Toggle ----
+                // ---- Toggle shuffle ----
+                // Flips shuffle on/off. When enabling, builds a shuffled
+                // index list and pins the current track to position 0 so it
+                // continues playing. Disables repeat-one.
                 PlayerCommand::ToggleShuffle => {
                     let mut s = state.lock().unwrap();
                     shuffle = !shuffle;
@@ -580,6 +752,8 @@ fn audio_loop(
                     }
                 }
 
+                // ---- Toggle repeat-all ----
+                // Flips repeat on/off. Disables repeat-one when enabling.
                 PlayerCommand::ToggleRepeat => {
                     let mut s = state.lock().unwrap();
                     repeat = !repeat;
@@ -588,6 +762,8 @@ fn audio_loop(
                     s.repeat_one = false;
                 }
 
+                // ---- Toggle repeat-one ----
+                // Flips repeat-one on/off. Disables repeat-all when enabling.
                 PlayerCommand::ToggleRepeatOne => {
                     let mut s = state.lock().unwrap();
                     repeat_one = !repeat_one;
@@ -596,7 +772,10 @@ fn audio_loop(
                     s.repeat_one = repeat_one;
                 }
 
-                // ---- Sort / Random ----
+                // ---- Sort playlist ----
+                // Sorts by the given option (Normal restores the saved copy,
+                // Alphabetical sorts by title). Re-indexes the current track
+                // so playback position is preserved.
                 PlayerCommand::SortBy(op) => {
                     let current_path = playlist.get(current_index).map(|t| t.path.clone());
                     match op {
@@ -618,6 +797,9 @@ fn audio_loop(
                     event_bus.publish(Event::PlaylistChanged);
                 }
 
+                // ---- Full random shuffle ----
+                // Shuffles the playlist in-place while keeping the current
+                // track at its logical position. Publishes PlaylistChanged.
                 PlayerCommand::AleatoryFullRandom => {
                     let current_path = playlist.get(current_index).map(|t| t.path.clone());
                     playlist.shuffle(&mut rng);
@@ -632,7 +814,9 @@ fn audio_loop(
                     event_bus.publish(Event::PlaylistChanged);
                 }
 
-                // ---- Jump ----
+                // ---- Jump to index ----
+                // Aborts crossfade, loads the target track, updates state,
+                // and publishes TrackChanged + StateChanged.
                 PlayerCommand::JumpTo(index) => {
                     if index >= playlist.len() {
                         continue;
@@ -650,6 +834,9 @@ fn audio_loop(
                     event_bus.publish(Event::StateChanged);
                 }
 
+                // ---- Jump to path ----
+                // Finds the first track whose path matches, then behaves
+                // identically to JumpTo.
                 PlayerCommand::JumpToPath(path) => {
                     if let Some(index) = playlist.iter().position(|t| t.path == path) {
                         xfade_phase = CrossfadePhase::Idle;
@@ -665,7 +852,7 @@ fn audio_loop(
                     }
                 }
 
-                // ---- DSP ----
+                // ---- DSP (EQ & Expander) ----
                 PlayerCommand::SetGainBass(g) => backend.low_gain(g),
                 PlayerCommand::SetGainMid(g) => backend.mid_gain(g),
                 PlayerCommand::SetGainHigh(g) => backend.high_gain(g),

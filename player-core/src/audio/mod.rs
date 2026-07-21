@@ -1,3 +1,9 @@
+//! Audio backend abstraction for the player.
+//!
+//! Defines the [`AudioBackend`] trait that all audio backends must implement,
+//! along with sub-modules for crossfade math, visualisation data sharing, and
+//! the Symphonia-based CPAL backend.
+
 use std::path::Path;
 
 use crate::Track;
@@ -13,29 +19,52 @@ pub mod viz_source;
 /// that the CPAL output callback drains.
 pub trait AudioBackend {
     // ---- Lifecycle ----
+    /// Load and begin decoding a track.
+    ///
+    /// Stops any current playback and aborts any pending crossfade before
+    /// spawning a new decode thread and CPAL output stream.
     fn load(&mut self, track: &Track);
+    /// Start or resume playback with a short fade-in.
     fn play(&mut self);
+    /// Pause playback, freezing the position counter until [`Self::play`] is called again.
     fn pause(&mut self);
+    /// Stop playback, join decode threads, and release the CPAL stream.
     fn stop(&mut self);
+    /// Seek to `seconds` into the track and restart decoding from that position.
     fn seek(&mut self, path: &Path, seconds: f32);
 
     // ---- State queries ----
+    /// Current playback position in seconds (adjusted for silence trim).
     fn position(&self) -> f32;
+    /// Output sample rate of the CPAL stream in Hz.
     fn sample_rate(&self) -> f32;
+    /// Shared buffer that the output callback fills with interleaved stereo samples
+    /// for the UI to render as a waveform.
     fn samples(&self) -> SharedSamples;
+    /// Whether the decode thread has reached end-of-file.
     fn finished(&self) -> bool;
+    /// Instantaneous loudness in dB for the right and left channels.
     fn get_db_loudness(&self) -> (f32, f32);
 
     // ---- Volume / DSP ----
+    /// Set the master output volume (`0.0` – `1.0`).
     fn set_volume(&self, volume: f32);
+    /// Low-shelf EQ gain multiplier (`0.0` – `2.0`).
     fn low_gain(&self, gain: f32);
+    /// Mid-band EQ gain multiplier (`0.0` – `2.0`).
     fn mid_gain(&self, gain: f32);
+    /// High-shelf EQ gain multiplier (`0.0` – `2.0`).
     fn high_gain(&self, gain: f32);
+    /// Stereo width for the mid/side expander (`0.0` = mono, `1.0` = original).
     fn set_expander_width(&self, width: f32);
 
     // ---- Silence trim ----
+    /// Configure silence trimming: skip `start_secs` from the beginning and
+    /// stop after `total_output_frames` frames.
     fn set_trim(&mut self, start_secs: f32, end_secs: f32, total_output_frames: u32);
+    /// Start trim offset in seconds.
     fn trim_start(&self) -> f32;
+    /// End trim offset in seconds.
     fn trim_end(&self) -> f32;
 
     // ---- Crossfade primitives ----

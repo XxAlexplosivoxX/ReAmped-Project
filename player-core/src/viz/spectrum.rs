@@ -1,6 +1,28 @@
+//! FFT-based spectrum analysis with logarithmic frequency band mapping.
+//!
+//! The analysis pipeline:
+//!
+//! 1. Mix stereo input to mono by averaging channels
+//! 2. Apply a Hann window to reduce spectral leakage
+//! 3. Compute forward real FFT via [rustfft]
+//! 4. Extract magnitude spectrum (log-scaled with `ln(mag + 1e-6)`)
+//! 5. Optionally apply spatial smoothing, remap to log-spaced bands, or
+//!    slice to a specific frequency range
+
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::{Arc, Mutex};
 
+/// Compute the log-magnitude FFT spectrum of the most recent audio buffer.
+///
+/// # Arguments
+///
+/// * `samples` – Shared ring buffer of interleaved stereo samples (`L,R,L,R,…`)
+/// * `size`    – Desired FFT size (must be a power of two)
+///
+/// # Returns
+///
+/// A vector of `size / 2` log-magnitude bins covering 0 Hz through the
+/// Nyquist frequency.
 pub fn spectrum(samples: Arc<Mutex<Vec<f32>>>, size: usize) -> Vec<f32> {
     let buf = samples.lock().unwrap();
     let frame_count = buf.len() / 2;
@@ -47,6 +69,16 @@ pub fn spectrum(samples: Arc<Mutex<Vec<f32>>>, size: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Apply a three-point spatial smoothing kernel to the spectrum.
+///
+/// Each bin (except the first and last third of the array) is replaced by
+/// a weighted average of its neighbours:
+///
+/// ```text
+/// out[i] = 0.25 × in[i-1] + 0.5 × in[i] + 0.25 × in[i+1]
+/// ```
+///
+/// The first and last third of the array are left untouched.
 pub fn smooth_spatial(input: &[f32]) -> Vec<f32> {
     let mut out = input.to_vec();
 
@@ -60,6 +92,20 @@ pub fn smooth_spatial(input: &[f32]) -> Vec<f32> {
 }
 
 
+/// Remap a linear FFT spectrum into logarithmically-spaced frequency bands.
+///
+/// Each band covers an equal interval in log-frequency from `f_min` to `f_max`.
+/// The magnitude for a band is the average of all FFT bins that fall within
+/// its frequency range.
+///
+/// # Arguments
+///
+/// * `spectrum`   – Log-magnitude spectrum from [`spectrum`]
+/// * `bands`      – Number of output bands
+/// * `sample_rate` – Sample rate in Hz
+/// * `fft_size`   – FFT size used to produce the spectrum
+/// * `f_min`      – Lowest frequency of interest (Hz)
+/// * `f_max`      – Highest frequency of interest (Hz)
 pub fn log_frequency_bands(
     spectrum: &[f32],
     bands: usize,
@@ -94,6 +140,10 @@ pub fn log_frequency_bands(
 }
 
 
+/// Extract a contiguous slice of the spectrum between `f_min` and `f_max`.
+///
+/// Convenience wrapper around [`spectrum`] that returns only the bins
+/// whose centre frequencies fall within the requested range.
 pub fn spectrum_range(
     samples: Arc<Mutex<Vec<f32>>>,
     fft_size: usize,
@@ -109,6 +159,11 @@ pub fn spectrum_range(
     raw[bin_min..bin_max.min(raw.len())].to_vec()
 }
 
+/// Evenly remap a spectrum slice into a fixed number of output bars.
+///
+/// Each output bar is the average of a contiguous, equal-width segment of
+/// the input data.  This is useful for driving a bar-graph visualiser with
+/// a consistent number of bars regardless of FFT size.
 pub fn remap_to_bars(data: &[f32], bars: usize) -> Vec<f32> {
     let len = data.len();
     let mut out = vec![0.0; bars];

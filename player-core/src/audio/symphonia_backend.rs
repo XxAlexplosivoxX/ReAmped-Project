@@ -1,3 +1,11 @@
+//! Symphonia-based CPAL audio backend.
+//!
+//! [`SymphoniaBackend`] implements the [`AudioBackend`] trait using the
+//! Symphonia decoding library for format-agnostic audio decoding and CPAL
+//! for cross-platform audio output. Decode runs in a dedicated thread that
+//! feeds a lock-free ring buffer; the CPAL output callback drains that buffer
+//! and applies DSP (EQ, stereo widening, volume, crossfade mixing).
+
 use std::{
     fs::File,
     path::{Path, PathBuf},
@@ -49,6 +57,27 @@ const RING_CAPACITY_FRAMES: usize = 192_000;
 // SymphoniaBackend
 // ---------------------------------------------------------------------------
 
+/// Audio backend using Symphonia (decode) + CPAL (output).
+///
+/// Drives decoding in a separate thread, feeding a lock-free ring buffer
+/// that the real-time CPAL output callback drains. All DSP parameters
+/// (volume, EQ, expander, crossfade gains) are stored as atomics so the
+/// callback can read them without locking.
+///
+/// ## Fields
+///
+/// * `samples` — shared visualisation buffer written by the output callback
+/// * `playing`, `alive`, `finished` — decode-thread lifecycle flags
+/// * `start`, `paused_at` — cumulative position tracking
+/// * `volume`, `low_gain`, `mid_gain`, `high_gain`, `expander_width` — DSP atomics (stored as u32 scaled by 100)
+/// * `db_meter_l`, `db_meter_r` — per-channel loudness meters
+/// * `fade_state`, `fade_start`, `fade_duration_ms`, `paused_during_fade` — play/pause fade control
+/// * `stream` — the active CPAL output stream
+/// * `decode_handle` — join handle for the primary decode thread
+/// * `next_alive`, `next_finished`, `next_decode_handle`, `next_path` — next-track (crossfade) decode resources
+/// * `xfade_*` — crossfade state atomics
+/// * `primary_consumer`, `xfade_consumer` — ring-buffer consumers hot-swapped during crossfade
+/// * `trim_start`, `trim_end`, `max_output_frames` — silence trimming configuration
 pub struct SymphoniaBackend {
     samples: SharedSamples,
     playing: Arc<AtomicBool>,
@@ -98,6 +127,11 @@ pub struct SymphoniaBackend {
 }
 
 impl SymphoniaBackend {
+    /// Construct a new [`SymphoniaBackend`].
+    ///
+    /// `samples` is a shared buffer that the CPAL output callback fills with
+    /// interleaved stereo frames for waveform visualisation. All other fields
+    /// are initialised to their default / idle state.
     pub fn new(samples: SharedSamples) -> Self {
         Self {
             samples,
@@ -139,8 +173,15 @@ impl SymphoniaBackend {
     }
 
     // -----------------------------------------------------------------------
-    // Internal: decode loop (primary)
+    // Internal: spawn decode thread + CPAL output stream
     // -----------------------------------------------------------------------
+    //
+    // Starts a Symphonia decode thread that feeds `primary_consumer`, then
+    // builds a CPAL output stream whose callback drains that consumer, applies
+    // DSP (EQ, stereo expander, volume, crossfade mixing), and writes samples
+    // to the visualisation shared buffer.
+    //
+    // `seek_seconds` — seek the decoder to this absolute position before playback.
     fn spawn_player(&mut self, path: &Path, seek_seconds: f32) {
         self.alive.store(true, Ordering::SeqCst);
         self.finished.store(false, Ordering::SeqCst);
@@ -189,6 +230,8 @@ impl SymphoniaBackend {
         // ---- CPAL output stream ----
         let mut eq_l = TripleBandEq::new();
         let mut eq_r = TripleBandEq::new();
+        let mut eq_xfade_l = TripleBandEq::new();
+        let mut eq_xfade_r = TripleBandEq::new();
         let mut expander_stereo = Expander::new();
 
         let low_g = self.low_gain.clone();
@@ -265,6 +308,8 @@ impl SymphoniaBackend {
 
                     eq_l.update_all(g_l, g_m, g_h, sample_rate_f);
                     eq_r.update_all(g_l, g_m, g_h, sample_rate_f);
+                    eq_xfade_l.update_all(g_l, g_m, g_h, sample_rate_f);
+                    eq_xfade_r.update_all(g_l, g_m, g_h, sample_rate_f);
 
                     // Track per-frame samples for viz + meters
                     let mut left_samples = Vec::with_capacity(out.len() / 2);
@@ -302,8 +347,8 @@ impl SymphoniaBackend {
                                     (0.0, 0.0)
                                 }
                             };
-                            let eq_nl = eq_l.process(n_l);
-                            let eq_nr = eq_r.process(n_r);
+                            let eq_nl = eq_xfade_l.process(n_l);
+                            let eq_nr = eq_xfade_r.process(n_r);
                             let (fn_l, fn_r) =
                                 expander_stereo.process_stereo_width(eq_nl, eq_nr);
 
@@ -340,6 +385,15 @@ impl SymphoniaBackend {
     // -----------------------------------------------------------------------
     // Static decode loop (shared by primary and next decode threads)
     // -----------------------------------------------------------------------
+    //
+    // Opens the file at `path`, probes the format with Symphonia, creates a
+    // decoder, seeks to `seek_seconds`, and decodes audio frames into the
+    // `producer` ring buffer. Resampling from the file's sample rate to
+    // `output_sr` is done via rubato. The loop exits when the file ends,
+    // `max_frames` is reached, or `alive` becomes false.
+    //
+    // The `playing` flag allows the caller to pause decoding without killing
+    // the thread (decoder sleeps instead of busy-waiting).
 
     #[allow(clippy::too_many_arguments)]
     fn decode_loop(
@@ -564,6 +618,9 @@ impl SymphoniaBackend {
 // ===========================================================================
 
 impl AudioBackend for SymphoniaBackend {
+    /// Load a track: stop current playback, abort any crossfade, and spawn a
+    /// new decode thread plus CPAL output stream. The decoder seeks to
+    /// `trim_start` so silence at the beginning of the file is skipped.
     fn load(&mut self, track: &Track) {
         self.stop();
         self.crossfade_abort();
@@ -571,6 +628,7 @@ impl AudioBackend for SymphoniaBackend {
         self.spawn_player(&track.path, seek);
     }
 
+    /// Start or resume playback with a short fade-in (state = 1).
     fn play(&mut self) {
         if self.start.is_none() {
             self.start = Some(Instant::now());
@@ -581,6 +639,9 @@ impl AudioBackend for SymphoniaBackend {
         *self.fade_start.lock().unwrap() = Some(Instant::now());
     }
 
+    /// Pause playback and freeze the position. A fade-out is triggered
+    /// (state = 2); once complete the playing flag is cleared by the callback.
+    /// Visualisation samples are cleared immediately.
     fn pause(&mut self) {
         if let Some(start) = self.start {
             self.paused_at += start.elapsed().as_secs_f32();
@@ -592,6 +653,8 @@ impl AudioBackend for SymphoniaBackend {
         *self.fade_start.lock().unwrap() = Some(Instant::now());
     }
 
+    /// Fully stop playback: abort crossfade, kill decode threads, drop the
+    /// CPAL stream, clear visualisation samples, and reset position.
     fn stop(&mut self) {
         self.crossfade_abort();
         self.next_alive.store(false, Ordering::SeqCst);
@@ -610,6 +673,8 @@ impl AudioBackend for SymphoniaBackend {
         self.samples.lock().unwrap().clear();
     }
 
+    /// Seek to `seconds` (relative, after trim) and restart playback.
+    /// The absolute seek position is `seconds + trim_start`.
     fn seek(&mut self, path: &Path, seconds: f32) {
         self.crossfade_abort();
         self.stop();
@@ -619,6 +684,7 @@ impl AudioBackend for SymphoniaBackend {
         self.spawn_player(path, raw_seek);
     }
 
+    /// Current playback position in seconds (trim-relative).
     fn position(&self) -> f32 {
         let ts = self.trim_start.load(Ordering::SeqCst);
         let abs = match self.start {
@@ -628,18 +694,25 @@ impl AudioBackend for SymphoniaBackend {
         (abs - ts).max(0.0)
     }
 
+    /// The output sample rate determined by the CPAL device.
     fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
 
+    /// Shared buffer filled by the output callback with interleaved stereo frames.
     fn samples(&self) -> SharedSamples {
         self.samples.clone()
     }
 
+    /// Whether the primary decode thread has reached end-of-file.
     fn finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
     }
 
+    /// Whether the primary consumer is empty *after* the decoder has finished.
+    ///
+    /// Returns `false` if the decoder is still running; only signals depletion
+    /// once EOF is reached and the ring buffer has been fully drained.
     fn consumer_depleted(&self) -> bool {
         if !self.finished.load(Ordering::SeqCst) {
             return false;
@@ -648,6 +721,7 @@ impl AudioBackend for SymphoniaBackend {
         pc.as_ref().is_none_or(|c| c.is_empty())
     }
 
+    /// Instantaneous loudness in dB for the right and left channels.
     fn get_db_loudness(&self) -> (f32, f32) {
         (
             self.db_meter_r.lock().unwrap().current_db,
@@ -655,42 +729,61 @@ impl AudioBackend for SymphoniaBackend {
         )
     }
 
+    /// Set master volume (0.0 – 1.0). Stored as u32 scaled by 100.
     fn set_volume(&self, volume: f32) {
         self.volume.store((volume * 100.0) as u32, Ordering::SeqCst);
     }
 
+    /// Low-shelf EQ gain (0.0 – 2.0). Stored as u32 scaled by 100.
     fn low_gain(&self, gain: f32) {
         self.low_gain.store((gain * 100.0) as u32, Ordering::SeqCst);
     }
 
+    /// Mid-band EQ gain (0.0 – 2.0). Stored as u32 scaled by 100.
     fn mid_gain(&self, gain: f32) {
         self.mid_gain.store((gain * 100.0) as u32, Ordering::SeqCst);
     }
 
+    /// High-shelf EQ gain (0.0 – 2.0). Stored as u32 scaled by 100.
     fn high_gain(&self, gain: f32) {
         self.high_gain.store((gain * 100.0) as u32, Ordering::SeqCst);
     }
 
+    /// Set stereo expander width (0.0 = mono, 1.0 = original). Stored as u32 scaled by 100.
     fn set_expander_width(&self, width: f32) {
         self.expander_width.store((width * 100.0) as u32, Ordering::SeqCst);
     }
 
+    /// Configure silence trimming.
+    ///
+    /// * `start_secs` — seconds to skip from the beginning of the file
+    /// * `end_secs` — seconds to trim from the end (not directly used here;
+    ///   `total_output_frames` is the effective limit)
+    /// * `total_output_frames` — maximum number of output frames to decode
     fn set_trim(&mut self, start_secs: f32, end_secs: f32, total_output_frames: u32) {
         self.trim_start.store(start_secs, Ordering::SeqCst);
         self.trim_end.store(end_secs, Ordering::SeqCst);
         self.max_output_frames.store(total_output_frames, Ordering::SeqCst);
     }
 
+    /// Start trim offset in seconds.
     fn trim_start(&self) -> f32 {
         self.trim_start.load(Ordering::SeqCst)
     }
 
+    /// End trim offset in seconds.
     fn trim_end(&self) -> f32 {
         self.trim_end.load(Ordering::SeqCst)
     }
 
     // ---- Crossfade primitives ----
 
+    /// Start decoding the next track into a secondary ring buffer.
+    ///
+    /// The next-track decode thread uses its own lifecycle flags
+    /// (`next_alive` / `next_finished`) and feeds `xfade_consumer`.
+    /// The consumer is hot-swapped to `primary_consumer` when the
+    /// crossfade completes (see [`crossfade_swap`](Self::crossfade_swap)).
     fn prepare_next(&mut self, path: &Path, trim_start: f32) {
         self.crossfade_abort();
         self.next_alive.store(true, Ordering::SeqCst);
@@ -731,6 +824,11 @@ impl AudioBackend for SymphoniaBackend {
         self.next_path = Some(path_for_store);
     }
 
+    /// Begin the crossfade in the CPAL callback.
+    ///
+    /// Sets the initial gains (out = 1.0, in = 0.0), records the start
+    /// instant, resets the micro-fade counter, and activates the crossfade.
+    /// The gains are updated externally by the player thread.
     fn start_crossfade(&mut self, duration_ms: u32) {
         self.xfade_out_gain.store(1.0, Ordering::SeqCst);
         self.xfade_in_gain.store(0.0, Ordering::SeqCst);
@@ -740,14 +838,17 @@ impl AudioBackend for SymphoniaBackend {
         self.xfade_active.store(true, Ordering::SeqCst);
     }
 
+    /// Whether the CPAL callback is currently crossfade-mixing two tracks.
     fn is_crossfade_active(&self) -> bool {
         self.xfade_active.load(Ordering::SeqCst)
     }
 
+    /// Whether the next-track decode thread has reached end-of-file.
     fn is_next_finished(&self) -> bool {
         self.next_finished.load(Ordering::SeqCst)
     }
 
+    /// Current crossfade gains `(out_gain, in_gain)` as set by the player thread.
     fn crossfade_gains(&self) -> (f32, f32) {
         (
             self.xfade_out_gain.load(Ordering::SeqCst),
@@ -755,11 +856,20 @@ impl AudioBackend for SymphoniaBackend {
         )
     }
 
+    /// Override crossfade gains (used when resuming from a pause during a fade).
     fn set_crossfade_gains(&self, out: f32, in_: f32) {
         self.xfade_out_gain.store(out, Ordering::SeqCst);
         self.xfade_in_gain.store(in_, Ordering::SeqCst);
     }
 
+    /// Promote the next-track to primary.
+    ///
+    /// Kills the old decode thread, swaps the crossfade consumer into the
+    /// primary slot, promotes the next decode handle, resets all crossfade
+    /// state, and adjusts the position counter to account for seconds that
+    /// have already played during the crossfade (`xf_elapsed`).
+    ///
+    /// Returns the path of the newly-promoted track.
     fn crossfade_swap(&mut self, xf_elapsed: f32) -> Option<PathBuf> {
         let path = self.next_path.take();
         let next_decode = self.next_decode_handle.take();
@@ -799,6 +909,10 @@ impl AudioBackend for SymphoniaBackend {
         path
     }
 
+    /// Immediately cancel a pending crossfade.
+    ///
+    /// Stops the next-track decode thread, removes its consumer, clears the
+    /// next path, and resets gains back to identity (out = 1.0, in = 0.0).
     fn crossfade_abort(&mut self) {
         self.xfade_active.store(false, Ordering::SeqCst);
         if let Some(h) = self.next_decode_handle.take() {
@@ -811,6 +925,7 @@ impl AudioBackend for SymphoniaBackend {
         self.xfade_in_gain.store(0.0, Ordering::SeqCst);
     }
 
+    /// The path of the currently prepared (next) track, if any.
     fn next_path(&self) -> Option<PathBuf> {
         self.next_path.clone()
     }

@@ -1,3 +1,10 @@
+//! Builder-pattern constructor for [`Player`].
+//!
+//! [`PlayerBuilder`] initialises the engine internals: the mpsc command
+//! channel, the shared [`PlayerState`], the ring buffer, loudness metres,
+//! and the event bus.  Calling [`build`](PlayerBuilder::build) spawns the
+//! audio decoder thread and returns a ready-to-use [`Player`] handle.
+
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 
@@ -9,6 +16,17 @@ use crate::engine::player::spawn_audio_thread;
 use crate::engine::state::PlayerState;
 use crate::metadata::default_cover;
 
+/// Builder for constructing a [`Player`] instance.
+///
+/// # Example
+///
+/// ```no_run
+/// use player_core::PlayerBuilder;
+///
+/// let player = PlayerBuilder::new()
+///     .with_volume(0.8)
+///     .build();
+/// ```
 pub struct PlayerBuilder {
     volume: f32,
 }
@@ -20,15 +38,21 @@ impl Default for PlayerBuilder {
 }
 
 impl PlayerBuilder {
+    /// Creates a new builder with default volume (`1.0`).
     pub fn new() -> Self {
         Self { volume: 1.0 }
     }
 
+    /// Sets the initial playback volume (clamped by the engine to `[0.0, 1.0]`).
     pub fn with_volume(mut self, volume: f32) -> Self {
         self.volume = volume;
         self
     }
 
+    /// Builds the player, spawning the audio thread and returning a [`Player`] handle.
+    ///
+    /// The spawned thread begins in a paused state, waiting for the first
+    /// `PlayerCommand::Play` to be sent.
     pub fn build(self) -> Player {
         let (cmd_tx, cmd_rx) = channel();
         let samples = Arc::new(Mutex::new(Vec::with_capacity(4096)));

@@ -1,3 +1,37 @@
+//! Application state and initialisation.
+//!
+//! # Architecture
+//!
+//! The [`PlayerApp`] struct is the top-level egui state.  It holds two logically
+//! separate concerns:
+//!
+//! * **Player-core handle** (`Player`) — a cloneable handle to the audio engine.
+//!   The player-core runs audio processing and decoding in **its own thread**,
+//!   completely independent of the UI thread.
+//! * **Egui state** — everything needed to render the UI: current volume,
+//!   spectrum visualiser, album‑art texture, colour palette derived from the
+//!   cover art, EQ/graphic‑equaliser values, a search string, and so on.
+//!
+//! # Thread model
+//!
+//! | Thread | Responsibility |
+//! |---|---|
+//! | **UI (eframe main thread)** | Runs `update()` every ~16 ms.  Paints egui widgets, polls player state, sends commands. |
+//! | **Player‑core thread** | Decodes audio, drives the output device, fills shared sample buffers. |
+//! | **Media‑sync thread** (spawned in [`PlayerApp::new`]) | Polls `player.playlist()`, `player.is_playing()` etc. every 150 ms and pushes snapshots into [`MediaControls`] for the UI to consume. |
+//! | **Library‑scan thread** (spawned in [`PlayerApp::load_library_async`]) | Scans configured music directories on disk and sends a [`PlayerCommand::SetPlaylist`] (or `SetPlaylistAndPlayIndex`) when done. |
+//!
+//! # Communication patterns
+//!
+//! * **Commands** — the UI sends a `PlayerCommand` via `player.send(...)`.
+//! * **State polling** — the UI reads `player.position()`, `player.is_playing()`,
+//!   `player.duration()`, `player.samples()` etc. **every frame** (lock‑free
+//!   shared state behind the handle).
+//! * **Events** — `player.try_recv_event()` can be used to receive one‑shot
+//!   notifications from the core (playback ended, track changed, …).
+//!
+//! The sub-module [`super::update`] contains the [`eframe::App`] implementation.
+
 use std::{collections::HashSet, sync::{Arc, Mutex}, thread, time::Duration};
 use egui::Color32;
 use player_core::{
@@ -6,36 +40,72 @@ use player_core::{
 use crate::{utils::{load_cover::load_cover_texture, media_controls::{MediaControls, MediaSnapshot}, misc::extract_palette, luminance::luminance, scan_music_dirs::scan_music_dirs, visualizer::SpectrumVisualizer}};
 use player_core::config::{AppConfig, load_config};
 
+/// Top-level egui application state.
+///
+/// Every field is `pub` so that the sub‑components in [`crate::ui_elements`]
+/// and [`crate::dsp_ui`] can read and write it directly (no separate
+/// controller layer).
 #[derive(Clone)]
 pub struct PlayerApp {
+    /// Cloneable handle to the player-core audio engine.
     pub player: Player,
+    /// Current volume level (0.0 – 1.0).
     pub volume: f32,
+    /// Spectrum / FFT visualiser state.
     pub visualizer: SpectrumVisualizer,
+    /// Stateful media-control buttons (play/pause/next/prev).
     pub media_controls: MediaControls,
+    /// Texture handle for the album-art cover, if loaded.
     pub cover_texture: Option<egui::TextureHandle>,
+    /// The track currently shown in the UI (may differ from the core's active
+    /// track while a seek or crossfade is in progress).
     pub current_track: Option<Track>,
+    /// Cached playback position in seconds, updated every frame.
     pub position: f32,
+    /// 3‑colour palette extracted from the cover art (or the custom fallback).
     pub palette: Vec<[u8; 3]>,
+    /// Same as [`palette`](Self::palette) but sorted by luminance.
     pub palette_sorted: Vec<[u8; 3]>,
+    /// Human‑readable status string shown in the UI (e.g. `"status: Playing"`).
     pub state: String,
+    /// Text colour derived from the palette (contrasting with the background).
     pub text_color: Color32,
+    /// Whether the window should be fullscreen.
     pub fullscreen: bool,
+    /// Whether the configuration/settings window is visible.
     pub show_settings: bool,
+    /// True during the very first frame after startup; used to suppress certain
+    /// animations or transitions.
     pub just_executed: bool,
+    /// Shared application configuration (loaded from disk on startup).
     pub config: Arc<Mutex<AppConfig>>,
+    /// Custom background colour 1 (0.0 – 1.0).
     pub rgb1: [f32; 3],
+    /// Custom background colour 2 (0.0 – 1.0).
     pub rgb2: [f32; 3],
+    /// Custom background colour 3 (0.0 – 1.0).
     pub rgb3: [f32; 3],
+    /// Whether colour‑picker 1 is expanded.
     pub show_picker1: bool,
+    /// Whether colour‑picker 2 is expanded.
     pub show_picker2: bool,
+    /// Whether colour‑picker 3 is expanded.
     pub show_picker3: bool,
+    /// Current library search / filter string.
     pub search_str: String,
+    /// Playlist sort order (normal or alphabetical).
     pub sort_option: Options,
+    /// Bass equaliser gain.
     pub bass_val: f32,
+    /// Mid equaliser gain.
     pub mid_val: f32,
+    /// High equaliser gain.
     pub high_val: f32,
+    /// Stereo‑width value.
     pub width_val: f32,
+    /// Tracks passed via CLI arguments at startup.
     pub startup_tracks: Vec<Track>,
+    /// Whether the playlist should scroll to the currently-playing track.
     pub scroll_current_track: bool,
 }
 
@@ -46,6 +116,19 @@ impl Default for PlayerApp {
 }
 
 impl PlayerApp {
+    /// Construct a new [`PlayerApp`].
+    ///
+    /// This constructor:
+    /// 1. Loads the persisted [`AppConfig`] from disk.
+    /// 2. Builds a [`Player`] via [`PlayerBuilder`], seeded with the saved
+    ///    volume.
+    /// 3. Creates a [`SpectrumVisualizer`] and a [`MediaControls`] handle.
+    /// 4. Initialises every UI field to its default / config-derived value.
+    /// 5. Spawns a **media‑sync background thread** that regularly copies the
+    ///    core's playlist snapshot into `media_controls`.
+    ///
+    /// `startup_tracks` — tracks discovered from CLI arguments; they will be
+    /// merged with the library scan result in [`load_library_async`](Self::load_library_async).
     pub fn new(startup_tracks: Vec<Track>) -> Self {
         let config_values = load_config();
         let config = Arc::new(Mutex::new(config_values.clone()));
@@ -101,6 +184,13 @@ impl PlayerApp {
         app
     }
 
+    /// Spawns a background thread that periodically synchronises the core's
+    /// playlist state into [`MediaControls`].
+    ///
+    /// The thread runs an infinite loop with a 150 ms sleep between iterations.
+    /// Each tick it reads `player.playlist()`, `player.playlist_idx()`, and
+    /// `player.is_playing()`, then pushes a [`MediaSnapshot`] to the
+    /// `media_controls` channel.
     fn spawn_media_sync_thread(&self) {
         let player = self.player.clone();
         let media_controls = self.media_controls.clone();
@@ -123,6 +213,20 @@ impl PlayerApp {
         });
     }
 
+    /// Load (or reload) the album‑art cover texture and derive a colour palette.
+    ///
+    /// If `ovride` is true, or the track has changed since the last call (or no
+    /// cover is loaded yet), the method:
+    ///
+    /// 1. Fetches the cover bitmap from `self.player.cover()`.
+    /// 2. Uploads it as an egui texture via [`load_cover_texture`].
+    /// 3. Extracts a 3‑colour palette with [`extract_palette`].
+    /// 4. Sorts the palette by luminance.
+    /// 5. Rebuilds the [`egui::Visuals`] so that every widget colour derives
+    ///    from the cover's dominant hues.
+    ///
+    /// If `cfg.theme.follow_cover` is false, the custom palette from
+    /// configuration is used instead.
     pub fn ensure_cover_loaded(&mut self, ctx: &egui::Context, ovride: bool) {
         let cfg = self.config.lock().unwrap();
         let current_track = {
@@ -210,6 +314,20 @@ impl PlayerApp {
         }
     }
 
+    /// Scan the configured music directories on a background thread.
+    ///
+    /// This method:
+    /// 1. Locks the config to read `music_dirs`.
+    /// 2. Spawns a `std::thread` that calls [`scan_music_dirs`].
+    /// 3. Optionally sorts the result alphabetically.
+    /// 4. Merges the library result with `self.startup_tracks`, deduplicating
+    ///    by path.
+    /// 5. Sends a [`PlayerCommand::SetPlaylist`] (or
+    ///    `SetPlaylistAndPlayIndex` if startup tracks are present) to the
+    ///    player core.
+    ///
+    /// This is called automatically when the playlist is empty (see the
+    /// `update` method in [`super::update`]).
     pub fn load_library_async(&self) {
         let cfg = self.config.lock().unwrap();
         let player = self.player.clone();

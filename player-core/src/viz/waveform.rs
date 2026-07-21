@@ -1,14 +1,43 @@
+//! Oscilloscope-style synchronized waveform extraction.
+//!
+//! The trigger pipeline resolves a stable trigger point from audio samples
+//! using a priority chain (highest to lowest):
+//!
+//! 1. **YIN pitch detection** – estimates the fundamental period
+//! 2. **FIR low-pass filter** – removes high-frequency noise (800 Hz cutoff)
+//! 3. **Sub-sample zero-crossing** – precise rising-edge detection via cubic
+//!    root finding (highest-priority successful result)
+//! 4. **Correlation trigger** – period-synchronous auto-correlation fallback
+//! 5. **Peak position** – simple amplitude peak as last resort
+//!
+//! A window of `4×` the estimated period is extracted around the trigger
+//! point using cubic interpolation for sub-sample precision.  The extracted
+//! frame is suitable for oscilloscope-style waveform display.
+
 use std::sync::{Arc, Mutex};
 
+/// Lowest frequency the YIN pitch detector can resolve.
 const MIN_FREQ: f32 = 40.0;
+/// Highest frequency the YIN pitch detector can resolve.
 const MAX_FREQ: f32 = 2000.0;
+/// YIN difference-function threshold below which a candidate period is accepted.
 const YIN_THRESHOLD: f32 = 0.15;
+/// Number of taps for the FIR low-pass filter.
 const FIR_NUM_TAPS: usize = 31;
+/// Cutoff frequency (Hz) for the FIR low-pass filter.
 const FIR_CUTOFF: f32 = 800.0;
+/// Multiple of the estimated period used to set the waveform extraction window.
 const PERIOD_MULTIPLIER: usize = 4;
+/// Minimum period (in samples) to prevent division-by-zero and spurious triggers.
 const MIN_PERIOD_SAMPLES: f32 = 22.0;
+/// Minimum window duration (seconds) when extracting synchronised samples.
 const MIN_WINDOW_SECS: f32 = 0.015;
 
+/// A synchronised waveform frame produced by [`synchronized_waveform`].
+///
+/// Contains the extracted sample window, the estimated period (in samples),
+/// the trigger position (sample index with sub-sample precision), the detected
+/// pitch (if any), and the sample rate.
 pub struct OscilloscopeFrame {
     pub samples: Vec<f32>,
     pub period: f32,
@@ -17,6 +46,13 @@ pub struct OscilloscopeFrame {
     pub sample_rate: f32,
 }
 
+/// Estimate the fundamental frequency of a mono signal using the YIN algorithm.
+///
+/// YIN computes a cumulative mean-normalised difference function (CMNDF) over
+/// candidate lags.  The first lag whose CMNDF value falls below
+/// [`YIN_THRESHOLD`] is selected, and a parabolic interpolation refines the
+/// estimate for sub-sample precision.  The search range is
+/// [`MIN_FREQ`]–[`MAX_FREQ`].
 fn yin_pitch_detection(samples: &[f32], sample_rate: f32) -> Option<f32> {
     let min_period = (sample_rate / MAX_FREQ) as usize;
     let max_period = (sample_rate / MIN_FREQ) as usize;
@@ -96,6 +132,11 @@ fn yin_pitch_detection(samples: &[f32], sample_rate: f32) -> Option<f32> {
     }
 }
 
+/// Design a low-pass FIR filter using the windowed-sinc method with a
+/// Blackman window.
+///
+/// Normalised cut-off at `cutoff_hz / sample_rate`.  Coefficients are
+/// normalised so the filter has unity gain at DC.
 fn design_lowpass_fir(cutoff_hz: f32, sample_rate: f32, num_taps: usize) -> Vec<f32> {
     let mut coeffs = vec![0.0; num_taps];
     let fc = cutoff_hz / sample_rate;
@@ -125,6 +166,10 @@ fn design_lowpass_fir(cutoff_hz: f32, sample_rate: f32, num_taps: usize) -> Vec<
     coeffs
 }
 
+/// Apply an FIR convolution (direct-form) to a sample buffer.
+///
+/// The output has the same length as the input; samples near the edges are
+/// zero-padded implicitly (out-of-range indices are skipped).
 fn apply_fir_filter(samples: &[f32], coeffs: &[f32]) -> Vec<f32> {
     let len = samples.len();
     let num_taps = coeffs.len();
@@ -145,6 +190,10 @@ fn apply_fir_filter(samples: &[f32], coeffs: &[f32]) -> Vec<f32> {
     out
 }
 
+/// Cubic Hermite interpolation at a fractional sample index.
+///
+/// Uses four neighbours (`i-1`, `i`, `i+1`, `i+2`) and a Catmull-Rom
+/// Hermite basis to produce a smooth curve through the sample points.
 fn cubic_interpolate(samples: &[f32], idx: f32) -> f32 {
     let i = idx as isize;
     let t = idx - i as f32;
@@ -165,6 +214,12 @@ fn cubic_interpolate(samples: &[f32], idx: f32) -> f32 {
     ((c3 * t + c2) * t + c1) * t + c0
 }
 
+/// Find the root of a cubic Hermite polynomial between `y1` and `y2`
+/// using Newton's method.
+///
+/// The polynomial is defined by the four control points `y0`–`y3`.
+/// The initial guess is a linear interpolation at the zero-crossing
+/// of the line through `y1` and `y2`.
 fn find_cubic_root(y0: f32, y1: f32, y2: f32, y3: f32) -> f32 {
     let c0 = y1;
     let c1 = 0.5 * (-y0 + y2);
@@ -190,8 +245,15 @@ fn find_cubic_root(y0: f32, y1: f32, y2: f32, y3: f32) -> f32 {
     t
 }
 
+/// Locate the first rising-edge zero-crossing with sub-sample precision.
+///
+/// Searches for a transition from negative to non-negative.  When found,
+/// [`find_cubic_root`] is used to compute the crossing position with
+/// sub-sample accuracy.  Crossings inside the FIR filter transient
+/// (first 15 samples) are skipped unless they are the only candidate.
 fn sub_sample_zero_crossing(samples: &[f32], start: usize) -> Option<f32> {
     let len = samples.len();
+    let mut first: Option<f32> = None;
     let mut i = start.max(1);
 
     while i < len - 2 {
@@ -202,14 +264,30 @@ fn sub_sample_zero_crossing(samples: &[f32], start: usize) -> Option<f32> {
             let y3 = if i + 1 < len { samples[i + 1] } else { samples[i] };
 
             let t = find_cubic_root(y0, y1, y2, y3);
-            return Some((i - 1) as f32 + t);
+            let pos = (i - 1) as f32 + t;
+
+            // If the very first crossing is outside the FIR transient → use it.
+            if first.is_none() {
+                first = Some(pos);
+                if i >= 15 {
+                    return first;
+                }
+            }
+            // If we found a crossing inside the transient, keep going:
+            // prefer the first crossing beyond the transient region.
+            if i >= 15 {
+                return Some(pos);
+            }
         }
         i += 1;
     }
 
-    None
+    first
 }
 
+/// Extract a window of `num_samples` starting at `trigger` using cubic interpolation.
+///
+/// Positions outside the buffer are padded with zero.
 fn extract_window(samples: &[f32], trigger: f32, num_samples: usize) -> Vec<f32> {
     let mut result = Vec::with_capacity(num_samples);
     let len = samples.len();
@@ -226,6 +304,11 @@ fn extract_window(samples: &[f32], trigger: f32, num_samples: usize) -> Vec<f32>
     result
 }
 
+/// Correct octave errors in period estimates by comparing with the previous frame.
+///
+/// If the new period is roughly double (`ratio ∈ (1.7, 2.35)`) or half
+/// (`ratio ∈ (0.4, 0.6)`) the previous period, it is halved or doubled
+/// respectively to resolve the octave ambiguity.
 fn correct_octave(p: f32, prev: f32) -> f32 {
     if prev <= 0.0 {
         return p;
@@ -240,6 +323,12 @@ fn correct_octave(p: f32, prev: f32) -> f32 {
     }
 }
 
+/// Find the best trigger point by maximising the auto-correlation of the
+/// signal with itself delayed by one period.
+///
+/// Searches the first `min(period * 4, len/3)` samples for the offset that
+/// yields the highest dot-product between `samples[t..t+window]` and
+/// `samples[t+p..t+p+window]`.
 fn correlation_trigger(samples: &[f32], period: f32) -> Option<f32> {
     let p = period.round() as usize;
     let len = samples.len();
@@ -276,6 +365,10 @@ fn correlation_trigger(samples: &[f32], period: f32) -> Option<f32> {
     }
 }
 
+/// Locate the absolute peak (maximum |amplitude|) from `start` onward.
+///
+/// Falls back to this method when zero-crossing and correlation triggers
+/// are unavailable.  Returns `None` if the peak amplitude is below 0.001.
 fn find_peak_position(samples: &[f32], start: usize) -> Option<f32> {
     let len = samples.len();
     if start >= len {
@@ -297,11 +390,27 @@ fn find_peak_position(samples: &[f32], start: usize) -> Option<f32> {
     }
 }
 
+/// Compute the RMS amplitude of a sample buffer.
 fn compute_rms(samples: &[f32]) -> f32 {
     let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+/// Extract a synchronised (trigger-aligned) waveform window from a stereo
+/// ring buffer.
+///
+/// The input is stereo interleaved (`L,R,L,R,…`).  It is down-mixed to
+/// mono, then the trigger pipeline runs:
+///
+/// 1. **YIN pitch detection** → estimated period (smoothed per-frame with
+///    octave correction and exponential averaging)
+/// 2. **FIR low-pass filter** (windowed-sinc, 31 taps, 800 Hz cutoff)
+/// 3. **Sub-sample zero-crossing** (highest-priority trigger)
+/// 4. **Correlation trigger** (period-synchronous auto-correlation)
+/// 5. **Peak position** (last resort)
+///
+/// The extracted window is `4 × period` samples long and uses cubic
+/// interpolation for sub-sample accuracy.
 pub fn synchronized_waveform(
     samples: Arc<Mutex<Vec<f32>>>,
     count: usize,
@@ -369,17 +478,11 @@ pub fn synchronized_waveform(
     let fir_coeffs = design_lowpass_fir(FIR_CUTOFF, sample_rate, FIR_NUM_TAPS);
     let filtered = apply_fir_filter(&mono, &fir_coeffs);
 
-    let trigger = sub_sample_zero_crossing(&filtered, FIR_NUM_TAPS / 2);
+    let trigger = sub_sample_zero_crossing(&filtered, 0);
 
-    let trigger = trigger.or_else(|| {
-        if pitch.is_some() {
-            correlation_trigger(&mono, period)
-        } else {
-            None
-        }
-    });
+    let trigger = trigger.or_else(|| correlation_trigger(&mono, period));
 
-    let trigger = trigger.or_else(|| find_peak_position(&filtered, FIR_NUM_TAPS / 2));
+    let trigger = trigger.or_else(|| find_peak_position(&filtered, 0));
 
     let trigger = trigger.unwrap_or(0.0);
 

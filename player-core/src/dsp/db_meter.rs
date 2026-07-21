@@ -1,16 +1,34 @@
+//! RMS-based decibel level meter with ballistic response.
+//!
+//! The [`DbMeter`] computes the RMS power of an audio buffer, converts it
+//! to dBFS, and applies a fast-attack / slow-release envelope for smooth
+//! visual metering.  Attack is instantaneous (sample-accurate jump to new
+//! peak), while release decays exponentially toward lower levels.
+
+/// RMS level meter with fast-attack, slow-release ballistics.
+///
+/// Instantaneously jumps to new peak levels (attack) and smoothly decays
+/// toward lower levels (release), mimicking analog VU meter behaviour.
 pub struct DbMeter {
     pub current_db: f32,
-    pub release_speed: f32, // How fast the meter falls
+    pub release_speed: f32,
 }
 
 impl DbMeter {
+    /// Create a new [`DbMeter`] with the meter floored at −100 dBFS.
     pub fn new() -> Self {
         Self {
             current_db: -100.0,
-            release_speed: 0.15, // Adjust for that "smooth" feel
+            release_speed: 0.15,
         }
     }
 
+    /// Process a buffer of samples and update the metered level.
+    ///
+    /// 1. Computes the RMS of all samples.
+    /// 2. Converts to dBFS (floor at −100 dB).
+    /// 3. Applies fast-attach / slow-release ballistics — the meter jumps
+    ///    instantly to a new peak and decays exponentially toward silence.
     pub fn process_buffer(&mut self, samples: &[f32]) {
         if samples.is_empty() { return; }
 

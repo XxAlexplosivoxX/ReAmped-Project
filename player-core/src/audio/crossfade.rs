@@ -1,3 +1,9 @@
+//! Crossfade utilities for gapless track transitions.
+//!
+//! Provides equal-power gain computation ([`equal_power_gains`]), a micro-fade
+//! mechanism to prevent clicks on phase discontinuity, and the
+//! [`CrossfadePhase`] state machine that drives the player's transition logic.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,6 +62,10 @@ pub fn advance_micro_fade(counter: &Arc<AtomicU32>, total: u32) -> f32 {
 // State machine for the player thread
 // ---------------------------------------------------------------------------
 
+/// State machine for crossfade transitions between two tracks.
+///
+/// Tracks the lifecycle from idle → preparing (next track decoding) → fading
+/// (both tracks mixing in the callback) or paused-fading (user paused mid-fade).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CrossfadePhase {
     /// No crossfade activity at all.
@@ -83,14 +93,17 @@ pub enum CrossfadePhase {
 }
 
 impl CrossfadePhase {
+    /// Returns `true` while a crossfade is mixing (or paused mid-fade).
     pub fn is_active(&self) -> bool {
         matches!(self, CrossfadePhase::Fading { .. } | CrossfadePhase::PausedFading { .. })
     }
 
+    /// Returns `true` if a next-track has been prepared (decoding or mixing).
     pub fn has_prepared(&self) -> bool {
         matches!(self, CrossfadePhase::Preparing { .. } | CrossfadePhase::Fading { .. } | CrossfadePhase::PausedFading { .. })
     }
 
+    /// The playlist index of the incoming (next) track, if one has been prepared.
     pub fn next_index(&self) -> Option<usize> {
         match self {
             CrossfadePhase::Preparing { next_index } => Some(*next_index),

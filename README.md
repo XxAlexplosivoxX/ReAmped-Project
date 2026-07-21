@@ -1,48 +1,116 @@
 # ReAmped
 
-ReAmped es un reproductor de música escrito en Rust con una interfaz gráfica en `egui` y backend de audio basado en `symphonia`.
+Description: A high-performance audio player in Rust with real-time DSP, gapless crossfade, and a modern egui UI.
 
-## Resumen del refactor
+## Architecture
 
-Este refactor se centró en volver más robusto el flujo de carga y selección de temas:
+```mermaid
+graph TD
+    subgraph desktop ["desktop — egui Frontend"]
+        UI[UI Layer<br/>buttons, cover, playlist]
+        VIS[Visualizers<br/>waveform, spectrum]
+        DSP_UI[DSP Controls<br/>EQ, Expander, VU Meter]
+        CONFIG[Config Window<br/>settings, keybindings]
+    end
+    
+    subgraph core ["player-core — Audio Engine"]
+        API[Public API<br/>Player, PlayerBuilder]
+        ENGINE[Engine<br/>State Machine, Commands, Events]
+        AUDIO[Audio Backend<br/>Symphonia Decode, CPAL Output]
+        DSP[Real-time DSP<br/>EQ, Expander, DbMeter, SilenceDetect]
+        VIZ[Visualization Data<br/>Waveform, Spectrum]
+        FFI[C FFI Layer<br/>Foreign Function Interface]
+    end
+    
+    subgraph node ["player-core-node — N-API Bindings"]
+        NAPI[N-API Bindings<br/>JsPlayer class]
+    end
 
-- El escaneo de archivos ahora es recursivo y tolerante a archivos no válidos o no compatibles.
-- La reproducción inicial se volvió atómica para evitar estados intermedios donde el tema quedaba seleccionado pero aún no cargado en el backend.
-- La navegación de la playlist dejó de depender solo de índices y ahora usa la ruta del archivo como identidad estable.
-- La UI mantiene el tema actual seleccionado incluso cuando está en pausa.
-- La sincronización de metadatos y estado visual se hizo más consistente al cambiar de tema o reordenar la playlist.
-
-## Nuevas funciones agregadas
-
-- Soporte para lanzar la app con archivos o carpetas como argumentos de línea de comandos.
-- Reproducción automática al iniciar si se pasaron temas por CLI.
-- Integración con controles multimedia en Linux mediante MPRIS.
-- Reordenamiento de playlist sin romper la selección del tema actual.
-- Búsqueda y selección en la mini playlist usando rutas estables del archivo.
-- Manejo más seguro de metadatos y carátulas cuando faltan datos o el archivo está dañado.
-
-## Comportamiento importante
-
-- Si pausas un tema, seguirá viéndose como seleccionado.
-- Si reordenas o mezclas la playlist, el tema actual se conserva por ruta, no por índice.
-- Si un archivo no es de audio o está corrupto, el escaneo lo ignora en lugar de fallar.
-
-## Estructura
-
-- `desktop/`: aplicación de escritorio y UI.
-- `player-core/`: lógica de reproducción, estado y backend de audio.
-- `assets/`: recursos embebidos como fuentes e imágenes.
-
-## Ejecución
-
-Desde la carpeta `desktop/`:
-
-```bash
-cargo run
+    UI --> API
+    VIS --> VIZ
+    DSP_UI --> API
+    ENGINE --> AUDIO
+    AUDIO --> DSP
+    API --> ENGINE
+    NAPI --> API
+    CONFIG --> API
 ```
 
-Si quieres probar el arranque con archivos o carpetas:
+## Prerequisites
+
+- Rust 2024 edition (MSRV)
+- Linux: `libasound2-dev` (ALSA) or `pipewire-jack`
+- macOS: CoreAudio (built-in)
+- Windows: WASAPI (built-in)
+
+## Build
 
 ```bash
-cargo run -- /ruta/a/tu/musica
+# Player core library
+cargo build --release -p player_core
+
+# Desktop UI application
+cargo build --release -p ReAmped
+
+# Node.js bindings
+cargo build --release -p player-core-node
+
+# Generate documentation
+cargo doc --no-deps --document-private-items -p player_core
 ```
+
+## Run
+
+```bash
+cargo run --release -p ReAmped
+```
+
+## Project Structure
+
+### `player-core` (core library)
+
+| Module | Description |
+|--------|-------------|
+| `api` | Public API: `Player` handle, `PlayerBuilder` |
+| `engine` | State machine, command/event bus, track management |
+| `audio` | Symphonia decoding, CPAL output, crossfade logic |
+| `dsp` | Real-time DSP: 3-band EQ, stereo expander, VU meter, silence detector |
+| `viz` | Oscilloscope waveform and FFT spectrum analyzers |
+| `ffi` | C-compatible FFI layer for embedding in other languages |
+| `config` | TOML configuration management |
+| `metadata` | Audio file metadata reading via Lofty |
+| `keybindings` | Configurable keyboard shortcuts |
+
+### `desktop` (UI application)
+
+| Module | Description |
+|--------|-------------|
+| `player` | Application state & egui `App` trait implementation |
+| `ui_elements` | Reusable widgets: buttons, cover, playlist, volume bar, settings |
+| `utils` | Helpers: background gradients, visualizers, MPRIS, font setup |
+| `dsp_ui` | DSP controls: EQ sliders, expander knob, VU meter display |
+
+### `player-core-node` (Node.js bindings)
+
+Exposes a `JsPlayer` class via N-API with transport controls, playlist management, EQ settings, and event callbacks.
+
+## Configuration
+
+Config file: `~/.config/reamped/config.toml`
+
+```toml
+volume = 1.0
+fullscreen = false
+crossfade_enabled = true
+crossfade_seconds = 6.0
+silence_trim_enabled = true
+
+[theme]
+follow_cover = true
+base_scale = 1.0
+pallete_custom = [[36, 36, 36], [209, 209, 209], [140, 140, 140]]
+```
+
+## License
+
+MIT
