@@ -62,12 +62,12 @@ pub struct PlayerApp {
     pub current_track: Option<Track>,
     /// Cached playback position in seconds, updated every frame.
     pub position: f32,
-    /// 3‑colour palette extracted from the cover art (or the custom fallback).
-    pub palette: Vec<[u8; 3]>,
-    /// Same as [`palette`](Self::palette) but sorted by luminance.
+    /// 3‑colour palette sorted by luminance.
     pub palette_sorted: Vec<[u8; 3]>,
+    /// Target palette that `palette_sorted` lerps toward (crossfade transition).
+    pub target_palette_sorted: Vec<[u8; 3]>,
     /// Human‑readable status string shown in the UI (e.g. `"status: Playing"`).
-    pub state: String,
+    pub state: &'static str,
     /// Text colour derived from the palette (contrasting with the background).
     pub text_color: Color32,
     /// Whether the window should be fullscreen.
@@ -107,6 +107,14 @@ pub struct PlayerApp {
     pub startup_tracks: Vec<Track>,
     /// Whether the playlist should scroll to the currently-playing track.
     pub scroll_current_track: bool,
+    /// Accumulated time (seconds) for background gradient animation.
+    pub bg_anim_t: f32,
+    /// Cached marquee text (to avoid font shaping every frame).
+    pub marquee_cache_text: String,
+    /// Cached marquee galley (reused when text hasn't changed).
+    pub marquee_cache_galley: Option<std::sync::Arc<egui::Galley>>,
+    /// Available width when `marquee_cache_galley` was last laid out.
+    pub marquee_cache_width: f32,
 }
 
 impl Default for PlayerApp {
@@ -144,9 +152,9 @@ impl PlayerApp {
             cover_texture: None,
             current_track: None,
             position: 0.0,
-            palette: vec![[0, 0, 0], [0, 0, 0], [0, 0, 0]],
             palette_sorted: vec![[0, 0, 0], [0, 0, 0], [0, 0, 0]],
-            state: String::from("status: Welcome"),
+            target_palette_sorted: vec![[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+            state: "status: Welcome",
             text_color: Color32::WHITE,
             fullscreen: config_values.fullscreen,
             show_settings: false,
@@ -178,6 +186,10 @@ impl PlayerApp {
             width_val: 1.0,
             startup_tracks,
             scroll_current_track: false,
+            bg_anim_t: 0.0,
+            marquee_cache_text: String::new(),
+            marquee_cache_galley: None,
+            marquee_cache_width: 0.0,
         };
 
         app.spawn_media_sync_thread();
@@ -253,17 +265,15 @@ impl PlayerApp {
             self.cover_texture = Some(load_cover_texture(ctx, &cover).unwrap());
             self.current_track = current_track;
             if cfg.theme.follow_cover {
-                self.palette = extract_palette(cover);
-                self.palette_sorted = self.palette.clone();
-                self.palette_sorted
+                self.target_palette_sorted = extract_palette(cover);
+                self.target_palette_sorted
                     .sort_by(|a, b| luminance(*a).partial_cmp(&luminance(*b)).unwrap());
             } else {
-                self.palette = cfg.theme.pallete_custom.clone();
-                self.palette_sorted = cfg.theme.pallete_custom.clone();
-                self.palette_sorted
+                self.target_palette_sorted = cfg.theme.pallete_custom.clone();
+                self.target_palette_sorted
                     .sort_by(|a, b| luminance(*a).partial_cmp(&luminance(*b)).unwrap());
             }
-            let palette = self.palette_sorted.clone();
+            let palette = self.target_palette_sorted.clone();
             let panel = Color32::from_rgba_unmultiplied_const(
                 palette[2][0],
                 palette[2][1],

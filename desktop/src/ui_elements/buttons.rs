@@ -1,22 +1,25 @@
 use egui::{Color32, Context, Ui};
 use player_core::{PlayerCommand};
-use crate::{PlayerApp, utils::marquee_text::show_marquee_text};
+use crate::{PlayerApp, utils::marquee_text::show_marquee_text_cached};
 
 pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut PlayerApp, text_color: Color32, accent: Color32) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             let metadata = player_app.player.metadata();
-            if let Some(metadata) = metadata {
-                let text = format!("\"{}\" By: {}", metadata.title, metadata.artist);
-                show_marquee_text(ui, &text, 40.0, text_color.clone());
+            let text = if let Some(ref metadata) = metadata {
+                format!("\"{}\" By: {}", metadata.title, metadata.artist)
             } else {
-                show_marquee_text(
-                    ui,
-                    "\"ReAmped\" — XxAlexplosivoxX",
-                    40.0,
-                    text_color.clone(),
-                );
-            }
+                String::from("\"ReAmped\" — XxAlexplosivoxX")
+            };
+            show_marquee_text_cached(
+                ui,
+                &text,
+                &mut player_app.marquee_cache_text,
+                &mut player_app.marquee_cache_galley,
+                &mut player_app.marquee_cache_width,
+                40.0,
+                text_color,
+            );
             ui.horizontal(|ui| {
                 let shuffle_on = player_app.player.shuffle();
                 let repeat_on = player_app.player.repeat();

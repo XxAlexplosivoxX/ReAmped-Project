@@ -431,19 +431,17 @@ fn audio_loop(
                 } else {
                     (0.0, 0.0)
                 };
-                let eff_dur = (raw_dur - ts - te).max(0.0);
+                let _eff_dur = (raw_dur - ts - te).max(0.0);
 
                 let mut s = state.lock().unwrap();
                 s.current_track = metadata.as_ref().map_or_else(
                     || track.title.clone(),
                     |m| m.title.clone(),
                 );
-                s.duration = eff_dur;
                 if let Some(ref m) = metadata {
                     s.cover = m.cover.clone();
                     s.metadata = Some(m.clone());
                 }
-                s.position = 0.0;
                 s.playlist_idx = next_idx;
                 drop(s);
 
@@ -598,8 +596,10 @@ fn audio_loop(
                 // time is preserved. Then unpause the backend.
                 PlayerCommand::Play => {
                     if let CrossfadePhase::PausedFading { next_index, saved_out, saved_in, fade_dur_secs, elapsed_secs } = xfade_phase {
-                        // Resume a frozen crossfade
+                        // Resume a frozen crossfade: restore gains and
+                        // re-activate mixing in the audio callback.
                         backend.set_crossfade_gains(saved_out, saved_in);
+                        backend.resume_crossfade();
                         let new_start = Instant::now() - Duration::from_secs_f32(elapsed_secs);
                         xfade_phase = CrossfadePhase::Fading {
                             next_index,

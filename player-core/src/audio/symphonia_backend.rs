@@ -642,12 +642,25 @@ impl AudioBackend for SymphoniaBackend {
     /// Pause playback and freeze the position. A fade-out is triggered
     /// (state = 2); once complete the playing flag is cleared by the callback.
     /// Visualisation samples are cleared immediately.
+    ///
+    /// If a crossfade was active, its mixing flag is cleared immediately so
+    /// the CPAL callback outputs only the primary track's fade-out. The
+    /// next-track ring buffer is preserved (the decode thread sleeps when
+    /// `playing` becomes false after the fade), so [`play()`] can resume the
+    /// crossfade from the frozen [`PausedFading`](crate::audio::crossfade::CrossfadePhase::PausedFading) gains.
     fn pause(&mut self) {
         if let Some(start) = self.start {
             self.paused_at += start.elapsed().as_secs_f32();
             self.start = None;
         }
         self.samples.lock().unwrap().clear();
+        // Stop crossfade mixing — the callback will only process the primary
+        // track's fade-out. The next-track consumer is kept alive so the
+        // decode thread can sleep in place and resume on play().
+        self.xfade_active.store(false, Ordering::SeqCst);
+        self.xfade_out_gain.store(0.0, Ordering::Relaxed);
+        self.xfade_in_gain.store(0.0, Ordering::Relaxed);
+        self.xfade_micro_frame.store(0, Ordering::SeqCst);
         self.paused_during_fade.store(true, Ordering::SeqCst);
         self.fade_state.store(2, Ordering::SeqCst);
         *self.fade_start.lock().unwrap() = Some(Instant::now());
@@ -856,7 +869,16 @@ impl AudioBackend for SymphoniaBackend {
         )
     }
 
-    /// Override crossfade gains (used when resuming from a pause during a fade).
+    /// Re-activate crossfade mixing in the CBAL callback after a pause.
+    ///
+    /// Gains must be restored first via [`set_crossfade_gains`]; this only
+    /// flags `xfade_active` back to `true` so the callback's mixing branch
+    /// is entered on the next invocation.
+    fn resume_crossfade(&self) {
+        self.xfade_active.store(true, Ordering::SeqCst);
+    }
+
+    /// Override crossfade gains (used when resuming from a pause during fade).
     fn set_crossfade_gains(&self, out: f32, in_: f32) {
         self.xfade_out_gain.store(out, Ordering::SeqCst);
         self.xfade_in_gain.store(in_, Ordering::SeqCst);

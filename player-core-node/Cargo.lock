@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "player_core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "atomic_float",
  "audioadapter-buffers",

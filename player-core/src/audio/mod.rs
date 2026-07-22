@@ -88,6 +88,14 @@ pub trait AudioBackend {
     /// Override crossfade gains (used when resuming from a pause during fade).
     fn set_crossfade_gains(&self, out: f32, in_: f32);
 
+    /// Resume crossfade mixing in the audio callback after a pause.
+    ///
+    /// The gains are expected to have been restored via
+    /// [`set_crossfade_gains`] already; this method only flags the
+    /// `xfade_active` atomic back to `true` so the callback's mixing
+    /// branch is re-entered.
+    fn resume_crossfade(&self);
+
     /// Promote the next track to primary. Stops the old decode thread,
     /// swaps consumers, resets crossfade state.
     /// `xf_elapsed` is how many seconds of the new track have already played

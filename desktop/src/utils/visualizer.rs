@@ -290,22 +290,17 @@ impl SpectrumVisualizer {
 
         let sample_rate = 44100.0;
 
-        for &freq in GRID_FREQS {
+        for (i, &freq) in GRID_FREQS.iter().enumerate() {
             let t = freq_to_x_frac(freq);
             let x = rect.left() + t * rect.width();
             painter.line_segment(
                 [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
                 Stroke::new(1.0, self.tooltip.grid_line),
             );
-            let label = if freq >= 1000.0 {
-                format!("{}k", freq as u32 / 1000)
-            } else {
-                format!("{}", freq as u32)
-            };
             painter.text(
                 Pos2::new(x - 4.0, rect.top() + 2.0),
                 egui::Align2::RIGHT_TOP,
-                label,
+                GRID_LABELS[i],
                 egui::FontId::proportional(9.0),
                 self.tooltip.grid_text,
             );
@@ -573,6 +568,7 @@ pub fn draw_waveform_raw(
 const SPECTRUM_F_MIN: f32 = 20.0;
 const SPECTRUM_F_MAX: f32 = 20000.0;
 const GRID_FREQS: &[f32] = &[100.0, 500.0, 1000.0, 5000.0, 10000.0, 20000.0];
+const GRID_LABELS: &[&str] = &["100", "500", "1k", "5k", "10k", "20k"];
 
 fn freq_to_note(freq: f32) -> String {
     if freq <= 0.0 {

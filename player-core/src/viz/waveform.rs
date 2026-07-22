@@ -14,7 +14,7 @@
 //! point using cubic interpolation for sub-sample precision.  The extracted
 //! frame is suitable for oscilloscope-style waveform display.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Lowest frequency the YIN pitch detector can resolve.
 const MIN_FREQ: f32 = 40.0;
@@ -22,6 +22,8 @@ const MIN_FREQ: f32 = 40.0;
 const MAX_FREQ: f32 = 2000.0;
 /// YIN difference-function threshold below which a candidate period is accepted.
 const YIN_THRESHOLD: f32 = 0.15;
+/// Number of samples fed to the YIN pitch detector (2048 @ 44.1 kHz ≈ 46 ms).
+const YIN_WINDOW: usize = 2048;
 /// Number of taps for the FIR low-pass filter.
 const FIR_NUM_TAPS: usize = 31;
 /// Cutoff frequency (Hz) for the FIR low-pass filter.
@@ -32,6 +34,26 @@ const PERIOD_MULTIPLIER: usize = 4;
 const MIN_PERIOD_SAMPLES: f32 = 22.0;
 /// Minimum window duration (seconds) when extracting synchronised samples.
 const MIN_WINDOW_SECS: f32 = 0.015;
+
+/// Cached FIR low-pass coefficients (computed once, reused forever).
+static FIR_COEFFS: OnceLock<Vec<f32>> = OnceLock::new();
+
+/// Pre-allocated scratch buffers reused across frames to avoid heap churn.
+struct ReusableBuffers {
+    mono: Vec<f32>,
+    d: Vec<f32>,
+    cmnd: Vec<f32>,
+    filtered: Vec<f32>,
+}
+
+thread_local! {
+    static BUF: std::cell::RefCell<ReusableBuffers> = std::cell::RefCell::new(ReusableBuffers {
+        mono: Vec::new(),
+        d: Vec::new(),
+        cmnd: Vec::new(),
+        filtered: Vec::new(),
+    });
+}
 
 /// A synchronised waveform frame produced by [`synchronized_waveform`].
 ///
@@ -53,7 +75,14 @@ pub struct OscilloscopeFrame {
 /// [`YIN_THRESHOLD`] is selected, and a parabolic interpolation refines the
 /// estimate for sub-sample precision.  The search range is
 /// [`MIN_FREQ`]–[`MAX_FREQ`].
-fn yin_pitch_detection(samples: &[f32], sample_rate: f32) -> Option<f32> {
+///
+/// Uses pre-allocated scratch buffers `d` and `cmnd` to avoid heap churn.
+fn yin_pitch_detection(
+    samples: &[f32],
+    sample_rate: f32,
+    d: &mut Vec<f32>,
+    cmnd: &mut Vec<f32>,
+) -> Option<f32> {
     let min_period = (sample_rate / MAX_FREQ) as usize;
     let max_period = (sample_rate / MIN_FREQ) as usize;
 
@@ -65,26 +94,29 @@ fn yin_pitch_detection(samples: &[f32], sample_rate: f32) -> Option<f32> {
         return None;
     }
 
-    let mut diff = vec![0.0; max_lag + 1];
+    d.resize(max_lag + 1, 0.0);
     for tau in 0..=max_lag {
         let mut sum = 0.0;
         let n = len - max_lag - 1;
-        for j in 0..n {
-            let d = samples[j] - samples[j + tau];
-            sum += d * d;
+        if n == 0 {
+            continue;
         }
-        diff[tau] = sum;
+        for j in 0..n {
+            let delta = samples[j] - samples[j + tau];
+            sum += delta * delta;
+        }
+        d[tau] = sum;
     }
 
     let mut running_sum = 0.0;
-    let mut cmnd = vec![0.0; max_lag + 1];
+    cmnd.resize(max_lag + 1, 0.0);
     cmnd[0] = 1.0;
     for tau in 1..=max_lag {
-        running_sum += diff[tau];
+        running_sum += d[tau];
         cmnd[tau] = if running_sum == 0.0 {
             1.0
         } else {
-            diff[tau] * tau as f32 / running_sum
+            d[tau] * tau as f32 / running_sum
         };
     }
 
@@ -170,12 +202,13 @@ fn design_lowpass_fir(cutoff_hz: f32, sample_rate: f32, num_taps: usize) -> Vec<
 ///
 /// The output has the same length as the input; samples near the edges are
 /// zero-padded implicitly (out-of-range indices are skipped).
-fn apply_fir_filter(samples: &[f32], coeffs: &[f32]) -> Vec<f32> {
+/// Writes into `out` (resized/overwritten as needed).
+fn apply_fir_filter(samples: &[f32], coeffs: &[f32], out: &mut Vec<f32>) {
     let len = samples.len();
     let num_taps = coeffs.len();
     let delay = num_taps / 2;
-    let mut out = vec![0.0; len];
-
+    out.clear();
+    out.reserve(len);
     for i in 0..len {
         let mut sum = 0.0;
         for j in 0..num_taps {
@@ -184,10 +217,8 @@ fn apply_fir_filter(samples: &[f32], coeffs: &[f32]) -> Vec<f32> {
                 sum += samples[idx as usize] * coeffs[j];
             }
         }
-        out[i] = sum;
+        out.push(sum);
     }
-
-    out
 }
 
 /// Cubic Hermite interpolation at a fractional sample index.
@@ -402,9 +433,10 @@ fn compute_rms(samples: &[f32]) -> f32 {
 /// The input is stereo interleaved (`L,R,L,R,…`).  It is down-mixed to
 /// mono, then the trigger pipeline runs:
 ///
-/// 1. **YIN pitch detection** → estimated period (smoothed per-frame with
-///    octave correction and exponential averaging)
-/// 2. **FIR low-pass filter** (windowed-sinc, 31 taps, 800 Hz cutoff)
+/// 1. **YIN pitch detection** (windowed to [`YIN_WINDOW`] samples) → estimated
+///    period (smoothed per-frame with octave correction and exponential
+///    averaging)
+/// 2. **FIR low-pass filter** (windowed-sinc, 31 taps, 800 Hz cutoff; cached)
 /// 3. **Sub-sample zero-crossing** (highest-priority trigger)
 /// 4. **Correlation trigger** (period-synchronous auto-correlation)
 /// 5. **Peak position** (last resort)
@@ -421,80 +453,89 @@ pub fn synchronized_waveform(
 
     let stereo_len = buf.len();
     let take_frames = count.min(stereo_len / 2);
-    let mut stereo: Vec<f32> = buf
-        .iter()
-        .rev()
-        .take(take_frames * 2)
-        .cloned()
-        .collect();
-    stereo.reverse();
-    drop(buf);
 
-    let mono: Vec<f32> = stereo
-        .chunks(2)
-        .filter(|ch| ch.len() == 2)
-        .map(|ch| (ch[0] + ch[1]) * 0.5)
-        .collect();
+    BUF.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let rb = &mut *guard;
 
-    if mono.len() < 8 {
-        return OscilloscopeFrame {
-            samples: mono,
-            period: *last_period,
-            trigger_pos: 0.0,
-            pitch_hz: None,
-            sample_rate,
-        };
-    }
+        rb.mono.clear();
+        rb.mono.reserve(take_frames);
 
-    if compute_rms(&mono) < 0.001 {
-        return OscilloscopeFrame {
-            samples: mono,
-            period: *last_period,
-            trigger_pos: 0.0,
-            pitch_hz: None,
-            sample_rate,
-        };
-    }
-
-    let pitch = yin_pitch_detection(&mono, sample_rate);
-    let new_period = pitch.map(|f| (sample_rate / f).max(MIN_PERIOD_SAMPLES));
-
-    if let Some(p) = new_period {
-        if *last_period <= 0.0 {
-            *last_period = p;
-        } else {
-            let corrected = correct_octave(p, *last_period);
-            *last_period = *last_period * 0.85 + corrected * 0.15;
+        let mut idx = stereo_len;
+        for _ in 0..take_frames {
+            if idx < 2 {
+                break;
+            }
+            idx -= 2;
+            let l = buf[idx];
+            let r = buf[idx + 1];
+            rb.mono.push((l + r) * 0.5);
         }
-    }
-    *last_period = last_period.max(MIN_PERIOD_SAMPLES);
+        drop(buf);
 
-    let period = *last_period;
+        if rb.mono.len() < 8 {
+            return OscilloscopeFrame {
+                samples: std::mem::take(&mut rb.mono),
+                period: *last_period,
+                trigger_pos: 0.0,
+                pitch_hz: None,
+                sample_rate,
+            };
+        }
 
-    let min_window = (sample_rate * MIN_WINDOW_SECS) as usize;
-    let window_size = (PERIOD_MULTIPLIER as f32 * period).ceil() as usize;
-    let window_size = window_size.max(min_window).min(mono.len() / 2);
+        if compute_rms(&rb.mono) < 0.001 {
+            return OscilloscopeFrame {
+                samples: std::mem::take(&mut rb.mono),
+                period: *last_period,
+                trigger_pos: 0.0,
+                pitch_hz: None,
+                sample_rate,
+            };
+        }
 
-    let fir_coeffs = design_lowpass_fir(FIR_CUTOFF, sample_rate, FIR_NUM_TAPS);
-    let filtered = apply_fir_filter(&mono, &fir_coeffs);
+        let yin_len = rb.mono.len().min(YIN_WINDOW);
+        let pitch = yin_pitch_detection(&rb.mono[..yin_len], sample_rate, &mut rb.d, &mut rb.cmnd);
+        let new_period = pitch.map(|f| (sample_rate / f).max(MIN_PERIOD_SAMPLES));
 
-    let trigger = sub_sample_zero_crossing(&filtered, 0);
+        if let Some(p) = new_period {
+            if *last_period <= 0.0 {
+                *last_period = p;
+            } else {
+                let corrected = correct_octave(p, *last_period);
+                *last_period = *last_period * 0.85 + corrected * 0.15;
+            }
+        }
+        *last_period = last_period.max(MIN_PERIOD_SAMPLES);
 
-    let trigger = trigger.or_else(|| correlation_trigger(&mono, period));
+        let period = *last_period;
 
-    let trigger = trigger.or_else(|| find_peak_position(&filtered, 0));
+        let min_window = (sample_rate * MIN_WINDOW_SECS) as usize;
+        let window_size = (PERIOD_MULTIPLIER as f32 * period).ceil() as usize;
+        let window_size = window_size.max(min_window).min(rb.mono.len() / 2);
 
-    let trigger = trigger.unwrap_or(0.0);
+        let fir_coeffs = FIR_COEFFS.get_or_init(|| {
+            design_lowpass_fir(FIR_CUTOFF, sample_rate, FIR_NUM_TAPS)
+        });
+        apply_fir_filter(&rb.mono, fir_coeffs, &mut rb.filtered);
 
-    let remaining = mono.len() as f32 - trigger;
-    let actual_window = window_size.min(remaining as usize).max(4);
-    let sync_samples = extract_window(&mono, trigger, actual_window);
+        let trigger = sub_sample_zero_crossing(&rb.filtered, 0);
 
-    OscilloscopeFrame {
-        samples: sync_samples,
-        period,
-        trigger_pos: trigger,
-        pitch_hz: pitch,
-        sample_rate,
-    }
+        let trigger = trigger.or_else(|| correlation_trigger(&rb.mono, period));
+
+        let trigger = trigger.or_else(|| find_peak_position(&rb.filtered, 0));
+
+        let trigger = trigger.unwrap_or(0.0);
+
+        let remaining = rb.mono.len() as f32 - trigger;
+        let actual_window = window_size.min(remaining as usize).max(4);
+        let sync_samples = extract_window(&rb.mono, trigger, actual_window);
+
+        OscilloscopeFrame {
+            samples: sync_samples,
+            period,
+            trigger_pos: trigger,
+            pitch_hz: pitch,
+            sample_rate,
+        }
+    })
 }

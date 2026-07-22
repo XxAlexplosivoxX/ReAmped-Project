@@ -86,12 +86,6 @@ impl eframe::App for PlayerApp {
     /// 8. If the playlist is empty, kicks off a background library scan.
     /// 9. Handles keyboard shortcuts via [`handle_keyboard_input`].
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let palette = self.palette_sorted.clone();
-        let panel =
-            Color32::from_rgba_unmultiplied_const(palette[2][0], palette[2][1], palette[2][2], 120);
-        let accent = panel.clone();
-        let accent = accent.gamma_multiply(1.2);
-        let text = Color32::from_rgb(palette[0][0], palette[0][1], palette[0][2]);
         let physical_width = ctx.input(|i| i.viewport_rect().width() * i.pixels_per_point());
 
         let base_width = 532.0;
@@ -99,6 +93,31 @@ impl eframe::App for PlayerApp {
         let target_scale = physical_width / base_width;
 
         ctx.set_pixels_per_point(target_scale);
+
+        let dt = ctx.input(|i| i.unstable_dt);
+        self.bg_anim_t += dt;
+
+        for i in 0..3 {
+            let c = &self.target_palette_sorted[i];
+            let cur = &self.palette_sorted[i];
+            self.palette_sorted[i] = [
+                lerp_u8(cur[0], c[0], 0.08),
+                lerp_u8(cur[1], c[1], 0.08),
+                lerp_u8(cur[2], c[2], 0.08),
+            ];
+        }
+        let palette = self.palette_sorted.clone();
+        let panel =
+            Color32::from_rgba_unmultiplied_const(palette[2][0], palette[2][1], palette[2][2], 120);
+        let accent = panel.clone();
+        let accent = accent.gamma_multiply(1.2);
+        let text = Color32::from_rgb(palette[0][0], palette[0][1], palette[0][2]);
+
+        let anim = self.bg_anim_t * 0.04;
+        let shift = |v: u8| -> u8 {
+            let s = (anim.sin() * 20.0) as i32;
+            (v as i32 + s).clamp(0, 255) as u8
+        };
 
         self.ensure_cover_loaded(&ctx, false);
         show_config_window(self, ctx, accent);
@@ -109,41 +128,21 @@ impl eframe::App for PlayerApp {
             draw_slanted_vertical_gradient(
                 painter,
                 rect,
-                Color32::from_rgb(palette[2][0], palette[2][1], palette[2][2]),
-                Color32::from_rgb(palette[1][0], palette[1][1], palette[1][2]),
+                Color32::from_rgb(
+                    shift(palette[2][0]),
+                    shift(palette[2][1]),
+                    shift(palette[2][2]),
+                ),
+                Color32::from_rgb(
+                    shift(palette[1][0]),
+                    shift(palette[1][1]),
+                    shift(palette[1][2]),
+                ),
                 -6.0,
             );
             ui.horizontal(|ui| {
                 show_cover(ui, self);
                 ui.vertical(|ui| {
-                    // ui.horizontal(|ui| {
-                    //     ui.vertical(|ui| {
-                    //         ui.horizontal(|ui| {
-                    //             let plugins = self.player.plugins_info();
-                    //             let plugins = plugins.lock().unwrap();
-                    //             let value1 = plugins.get_key_value("VU Meter");
-                    //             let value2 = plugins.get_key_value("RMS Meter");
-                    //             ui.vertical(|ui| {
-                    //                 if value1.is_some() {
-                    //                     draw_meter(ui, value1.unwrap().1.clone(), accent, text);
-                    //                     ui.label(format!("{:.1}", *value1.unwrap().1));
-                    //                 } else {
-                    //                     draw_meter(ui, 0.0, accent, text);
-                    //                     ui.label(format!("{:.1}", 0.0));
-                    //                 }
-                    //             });
-                    //             ui.vertical(|ui| {
-                    //                 if value2.is_some() {
-                    //                     draw_meter(ui, value2.unwrap().1.clone(), accent, text);
-                    //                     ui.label(format!("{:.1}", *value2.unwrap().1));
-                    //                 } else {
-                    //                     draw_meter(ui, 0.0, accent, text);
-                    //                     ui.label(format!("{:.1}", 0.0));
-                    //                 }
-                    //             });
-                    //         });
-                    //     });
-                    // });
                     show_buttons_and_title(ui, ctx, self, self.text_color.clone(), accent);
                     ui.horizontal(|ui| {
                         // 1. EQ on the far left
@@ -225,11 +224,11 @@ impl eframe::App for PlayerApp {
                     self.position = self.player.position();
                 }
                 if response.dragged() {
-                    self.state = String::from("status: Seeking")
+                    self.state = "status: Seeking"
                 }
                 if response.drag_stopped() {
                     self.player.send(PlayerCommand::Seek(pos));
-                    self.state = String::from("status: Playing");
+                    self.state = "status: Playing";
                 }
             });
             let height = ui.available_height() - 10.0;
@@ -243,7 +242,7 @@ impl eframe::App for PlayerApp {
             let samples = self.player.samples().clone();
             let wave = synchronized_waveform(
                 samples,
-                4096,
+                8192,
                 self.player.get_sample_rate(),
                 &mut self.visualizer.last_period,
             );
@@ -258,17 +257,13 @@ impl eframe::App for PlayerApp {
             );
             self.visualizer.draw_beat_stripes(ui, accent, text);
             if self.player.is_playing() {
-                self.state = String::from("status: Playing");
+                self.state = "status: Playing";
                 self.just_executed = false;
             } else {
-                self.state = String::from("status: Paused")
+                self.state = "status: Paused"
             }
 
-            if self.player.is_playing() {
-                ctx.request_repaint_after(Duration::from_millis(16));
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(16));
-            }
+            ctx.request_repaint_after(Duration::from_millis(16));
 
             if self.player.playlist().is_empty() {
                 self.load_library_async();
@@ -284,4 +279,8 @@ impl eframe::App for PlayerApp {
             }
         });
     }
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t) as u8
 }

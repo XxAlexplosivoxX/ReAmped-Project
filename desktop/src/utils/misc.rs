@@ -72,8 +72,8 @@ pub fn setup_fonts(ctx: &egui::Context) {
 pub fn extract_palette(cover: CoverArt) -> Vec<[u8; 3]> {
     let img = image::load_from_memory(&cover.data).ok().unwrap();
 
-    // let img = img.resize(128, 128, image::imageops::FilterType::Lanczos3);
-    let rgb = img.to_rgb8();
+    let small = img.resize(128, 128, image::imageops::FilterType::Nearest);
+    let rgb = small.to_rgb8();
     let pixels = rgb.as_raw();
 
     let palette = get_palette(pixels, ColorFormat::Rgb, 2, 3).unwrap_or_default();
