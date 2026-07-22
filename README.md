@@ -88,7 +88,7 @@ cargo run --release -p ReAmped
 | `player` | Application state & egui `App` trait implementation |
 | `ui_elements` | Reusable widgets: buttons, cover, playlist, volume bar, settings |
 | `utils` | Helpers: background gradients, visualizers, MPRIS, font setup |
-| `dsp_ui` | DSP controls: EQ sliders, expander knob, VU meter display |
+| `dsp_ui` | DSP controls: EQ knobs, expander knob, VU meter display |
 
 ### `player-core-node` (Node.js bindings)
 
