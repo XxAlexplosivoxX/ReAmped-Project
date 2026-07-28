@@ -65,6 +65,23 @@ cargo doc --no-deps --document-private-items -p player_core
 cargo run --release -p ReAmped
 ```
 
+## Install
+
+```bash
+# Per-user install (default, no root needed)
+./install.sh
+
+# System-wide install (requires sudo)
+sudo ./install.sh
+
+# Skip build if already compiled
+./install.sh --no-build
+```
+
+Installs the binary to `~/.local/bin/reamped` (or `/usr/local/bin/`), the icon and assets to `~/.local/share/ReAmped/`, and creates a desktop entry. If `fish_add_path` is available, it adds `~/.local/bin` to PATH automatically; otherwise, you may need to add it to your shell config manually.
+
+Run `reamped` after installation.
+
 ## Project Structure
 
 ### `player-core` (core library)

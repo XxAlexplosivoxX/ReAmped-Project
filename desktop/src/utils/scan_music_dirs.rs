@@ -6,10 +6,10 @@ use player_core::{metadata::read_metadata, Track};
 use walkdir::WalkDir;
 
 const AUDIO_EXTS: &[&str] = &[
-    "mp3", "mpa", "m4a", "m4b", "m4r", "mp4",
-    "wav", "wave", "aif", "aiff", "aifc", "caf",
+    "mp3", "mpa",
+    "wav", "wave", "aif", "aiff", "aifc",
     "flac", "ogg", "oga", "vorbis",
-    "mka", "mkv", "webm", "alac",
+    "mka", "mkv", "webm",
 ];
 
 fn fallback_track_info(path: &Path) -> (String, String, f32) {

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ReAmped
+Comment=Music player with built-in equalizer
+Exec=reamped %F
+Icon=reamped
+Terminal=false
+Categories=AudioVideo;Audio;Music;Player;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/wav;audio/aiff;audio/x-matroska;audio/webm;
+StartupNotify=true
+StartupWMClass=ReAmped

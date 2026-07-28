@@ -3,9 +3,10 @@ use player_core::{Track, PlayerCommand};
 use egui::{Color32, RichText, TextEdit, Ui};
 use std::{time::Duration, thread::sleep};
 
-pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp, accent: Color32) {
+pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp) {
     if ui
         .horizontal(|ui| {
+            let p = &player.palette;
             if !ui
                 .add_sized(
                     [ui.available_width() / 3.0, ui.available_height()],
@@ -13,20 +14,16 @@ pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp, accent:
                         .hint_text(
                             RichText::new("type here to search...")
                                 .color(
-                                    Color32::from_rgb(
-                                        player.palette_sorted[0][0],
-                                        player.palette_sorted[0][1],
-                                        player.palette_sorted[0][2],
-                                    )
+                                    Color32::from_rgb(p.on_surface[0], p.on_surface[1], p.on_surface[2])
                                     .linear_multiply(0.5),
                                 )
                                 .italics(),
                         )
                         .background_color(
                             Color32::from_rgba_premultiplied(
-                                player.palette_sorted[1][0],
-                                player.palette_sorted[1][1],
-                                player.palette_sorted[1][2],
+                                p.surface_variant[0],
+                                p.surface_variant[1],
+                                p.surface_variant[2],
                                 100,
                             )
                             .linear_multiply(0.5),
@@ -40,9 +37,9 @@ pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp, accent:
             mini_playlist(
                 ui,
                 &playlist,
-                player.current_track.clone(),
+                player.current_track(),
                 player.player.is_playing(),
-                accent,
+                &player.palette,
                 |track: &Track| player.player.send(PlayerCommand::JumpToPath(track.path.clone())),
                 player.position,
                 player.just_executed,

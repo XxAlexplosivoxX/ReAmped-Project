@@ -1,14 +1,15 @@
+use std::sync::{Arc, Mutex};
+
 use egui::{
     Color32, Painter, Pos2, Rect, Shape, Stroke,
     epaint::{Mesh, Vertex},
 };
 use player_core::audio::viz_source::SharedSamples;
-use player_core::config::AppConfig;
+use player_core::config::{AppConfig, M3Palette};
 use player_core::viz::spectrum::{log_frequency_bands, smooth_spatial, spectrum};
 use player_core::viz::waveform::OscilloscopeFrame;
-use std::sync::{Arc, Mutex};
 
-use crate::{dsp_ui::db_meter::calculate_db};
+use crate::dsp_ui::db_meter::calculate_db;
 
 #[derive(Clone, Debug)]
 pub struct SpectrumVisualizer {
@@ -38,7 +39,6 @@ pub struct BeatStripe {
 impl SpectrumVisualizer {
     pub fn new(config: Arc<Mutex<AppConfig>>) -> Self {
         let bars = config.lock().unwrap().spectrum_bars_quantity;
-        let default_palette = [[36, 36, 36], [140, 140, 140], [209, 209, 209]];
 
         Self {
             state: SpectrumState {
@@ -54,15 +54,13 @@ impl SpectrumVisualizer {
             config,
             loudness: -100.0,
             last_period: 0.0,
-            tooltip: TooltipColors::from_palette(&default_palette),
+            tooltip: TooltipColors::from_palette(&M3Palette::default()),
             last_palette_hash: 0,
         }
     }
 
-    pub fn update_palette(&mut self, palette: &[[u8; 3]]) {
-        let hash = palette
-            .iter()
-            .fold(0u64, |h, c| h.wrapping_mul(31).wrapping_add(c[0] as u64 ^ ((c[1] as u64) << 8) ^ ((c[2] as u64) << 16)));
+    pub fn update_palette(&mut self, palette: &M3Palette) {
+        let hash = hash_palette(palette);
         if hash != self.last_palette_hash {
             self.tooltip = TooltipColors::from_palette(palette);
             self.last_palette_hash = hash;
@@ -73,10 +71,9 @@ impl SpectrumVisualizer {
         &mut self,
         ui: &mut egui::Ui,
         samples: &SharedSamples,
-        palette: &[[u8; 3]],
+        palette: &M3Palette,
     ) {
         self.update_palette(palette);
-        let (r, g, b) = (palette[0][0], palette[0][1], palette[0][2]);
 
         let (bands_quantity, smooth_enabled, fft_size, spectrum_mode_line, old_style) = {
             let cfg = self.config.lock().unwrap();
@@ -96,13 +93,8 @@ impl SpectrumVisualizer {
             };
         }
 
-        let base_color = ui.visuals().text_color();
-        let peak_color = ui
-            .visuals()
-            .widgets
-            .noninteractive
-            .weak_bg_fill
-            .linear_multiply(1.2);
+        let base_color = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
+        let peak_color = Color32::from_rgb(palette.on_primary_container[0], palette.on_primary_container[1], palette.on_primary_container[2]);
         let raw = spectrum(samples.clone(), fft_size);
         let target_db = calculate_db(&raw);
         self.loudness = egui::lerp(self.loudness..=target_db, 0.2);
@@ -165,7 +157,7 @@ impl SpectrumVisualizer {
 
                 painter.add(Shape::convex_polygon(
                     points,
-                    egui::Color32::from_rgb(r, g, b),
+                    Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]),
                     egui::Stroke::NONE,
                 ));
             }
@@ -438,6 +430,21 @@ impl SpectrumVisualizer {
     }
 }
 
+fn hash_palette(palette: &M3Palette) -> u64 {
+    let mut h: u64 = 0;
+    macro_rules! mix {
+        ($field:ident) => {
+            h = h.wrapping_mul(31).wrapping_add(palette.$field[0] as u64);
+            h = h.wrapping_mul(31).wrapping_add(palette.$field[1] as u64);
+            h = h.wrapping_mul(31).wrapping_add(palette.$field[2] as u64);
+        };
+    }
+    mix!(primary); mix!(secondary); mix!(tertiary);
+    mix!(surface); mix!(on_surface); mix!(surface_variant);
+    mix!(background); mix!(outline);
+    h
+}
+
 pub fn energy_all_freq(spectrum: &[f32]) -> f32 {
     let mut energy = 0.0;
 
@@ -446,36 +453,6 @@ pub fn energy_all_freq(spectrum: &[f32]) -> f32 {
     }
 
     (energy / spectrum.len() as f32) * 2.5
-}
-
-pub fn _draw_waveform(ui: &mut egui::Ui, samples: &[f32], color: egui::Color32) {
-    let rect = ui.available_rect_before_wrap();
-    let painter = ui.painter_at(rect).with_clip_rect(rect);
-
-    let w = rect.width();
-    let h = rect.height();
-    let center_y = rect.center().y;
-
-    let len = samples.len().max(1);
-
-    let step_x = w / (len - 1) as f32;
-    let amp = h * 0.45; // altura usable
-
-    let mut last = None;
-
-    for (i, &s) in samples.iter().enumerate() {
-        let x = rect.left() + i as f32 * step_x;
-        let y = center_y - s * amp;
-
-        let p = egui::pos2(x, y);
-
-        if let Some(prev) = last {
-            painter.line_segment([prev, p], egui::Stroke::new(1.2, color));
-        }
-
-        last = Some(p);
-    }
-    ui.allocate_rect(rect, egui::Sense::hover());
 }
 
 pub fn draw_waveform_raw(
@@ -635,16 +612,16 @@ pub struct TooltipColors {
 }
 
 impl TooltipColors {
-    pub fn from_palette(palette: &[[u8; 3]]) -> Self {
-        let bg_lum = relative_luminance(palette[2]);
+    pub fn from_palette(palette: &M3Palette) -> Self {
+        let bg_lum = relative_luminance(palette.surface);
         let is_light = bg_lum > 0.5;
 
         let (bg, text) = if is_light {
-            let c = palette[0];
+            let c = palette.on_surface;
             (Color32::from_rgb(c[0], c[1], c[2]), Color32::WHITE)
         } else {
-            let bg_c = palette[2];
-            let tc = palette[0];
+            let bg_c = palette.surface;
+            let tc = palette.on_surface;
             (
                 Color32::from_rgb(
                     bg_c[0].max(80),
@@ -655,30 +632,16 @@ impl TooltipColors {
             )
         };
 
-        let accent = Color32::from_rgb(palette[1][0], palette[1][1], palette[1][2]);
+        let accent = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
+        let on_surface = Color32::from_rgb(palette.on_surface[0], palette.on_surface[1], palette.on_surface[2]);
 
         Self {
             bg,
             text,
             border: accent.linear_multiply(0.7),
-            grid_line: Color32::from_rgba_unmultiplied(
-                palette[0][0],
-                palette[0][1],
-                palette[0][2],
-                51,
-            ),
-            grid_text: Color32::from_rgba_unmultiplied(
-                palette[0][0],
-                palette[0][1],
-                palette[0][2],
-                102,
-            ),
-            cursor: Color32::from_rgba_unmultiplied(
-                palette[1][0],
-                palette[1][1],
-                palette[1][2],
-                102,
-            ),
+            grid_line: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 51),
+            grid_text: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 102),
+            cursor: Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 102),
         }
     }
 }

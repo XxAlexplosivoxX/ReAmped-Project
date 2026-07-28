@@ -44,6 +44,13 @@ pub fn default_cover() -> CoverArt {
     }
 }
 
+/// Returns `true` when `cover` is the compiled-in default placeholder
+/// (i.e. the audio file had no embedded cover art).
+pub fn is_default_cover(cover: &CoverArt) -> bool {
+    const DEFAULT_COVER: &[u8] = include_bytes!("../../assets/default.png");
+    cover.data.len() == DEFAULT_COVER.len() && cover.data == DEFAULT_COVER
+}
+
 /// Reads metadata and cover art from an audio file.
 ///
 /// Returns `None` when the file cannot be opened or no tags are found.

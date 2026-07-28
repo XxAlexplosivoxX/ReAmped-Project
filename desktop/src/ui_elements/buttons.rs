@@ -1,8 +1,27 @@
 use egui::{Color32, Context, Ui};
-use player_core::{PlayerCommand};
-use crate::{PlayerApp, utils::marquee_text::show_marquee_text_cached};
+use player_core::PlayerCommand;
+use crate::PlayerApp;
+use crate::utils::marquee_text::show_marquee_text_cached;
 
-pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut PlayerApp, text_color: Color32, accent: Color32) {
+fn sel_button(ui: &mut Ui, selected: bool, label: &str, on_color: Color32, off_color: Color32) -> egui::Response {
+    if selected {
+        ui.add(
+            egui::Button::selectable(true, egui::RichText::new(label).color(off_color))
+                .fill(on_color),
+        )
+    } else {
+        ui.add(
+            egui::Button::selectable(false, egui::RichText::new(label).color(off_color))
+                .fill(Color32::TRANSPARENT),
+        )
+    }
+}
+
+pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut PlayerApp, text_color: Color32) {
+    let p = &player_app.palette;
+    let on_bg = Color32::from_rgb(p.primary[0], p.primary[1], p.primary[2]);
+    let off_fg = Color32::from_rgb(p.on_surface[0], p.on_surface[1], p.on_surface[2]);
+
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             let metadata = player_app.player.metadata();
@@ -18,7 +37,7 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 &mut player_app.marquee_cache_galley,
                 &mut player_app.marquee_cache_width,
                 40.0,
-                text_color,
+                Color32::from_rgb(off_fg[0], off_fg[1], off_fg[2]),
             );
             ui.horizontal(|ui| {
                 let shuffle_on = player_app.player.shuffle();
@@ -26,10 +45,9 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 let repeat_one_on = player_app.player.repeat_one();
                 let play_on = player_app.player.is_playing();
 
-                if ui.add(egui::Button::new("⏮")).clicked() {
+                if ui.add(egui::Button::new("⏮").fill(Color32::TRANSPARENT)).clicked() {
                     let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Prev);
-                    // Wait for state to actually change
                     for _ in 0..50 {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         if player_app.player.playlist_idx() != old_idx {
@@ -40,42 +58,21 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                     ctx.request_repaint();
                 }
 
-                if ui.add(egui::Button::new("⏹")).clicked() {
+                if ui.add(egui::Button::new("⏹").fill(Color32::TRANSPARENT)).clicked() {
                     player_app.player.send(PlayerCommand::Stop);
                 }
 
-                if ui
-                    .add(egui::Button::selectable(
-                        play_on,
-                        egui::RichText::new("▶").color(if play_on {
-                            accent.linear_multiply(2.4)
-                        } else {
-                            ui.visuals().text_color()
-                        }),
-                    ))
-                    .clicked()
-                {
+                if sel_button(ui, play_on, "▶", on_bg, off_fg).clicked() {
                     player_app.player.send(PlayerCommand::Play);
                 }
 
-                if ui
-                    .add(egui::Button::selectable(
-                        !play_on,
-                        egui::RichText::new("⏸").color(if !play_on {
-                            accent.linear_multiply(2.4)
-                        } else {
-                            ui.visuals().text_color()
-                        }),
-                    ))
-                    .clicked()
-                {
+                if sel_button(ui, !play_on, "⏸", on_bg, off_fg).clicked() {
                     player_app.player.send(PlayerCommand::Pause);
                 }
 
-                if ui.add(egui::Button::new("⏭")).clicked() {
+                if ui.add(egui::Button::new("⏭").fill(Color32::TRANSPARENT)).clicked() {
                     let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Next);
-                    // Wait for state to actually change
                     for _ in 0..50 {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         if player_app.player.playlist_idx() != old_idx {
@@ -89,60 +86,30 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                     egui::Stroke::new(1.0, text_color);
                 ui.separator();
 
-                if ui
-                    .add(egui::Button::selectable(
-                        shuffle_on,
-                        egui::RichText::new("🔀").color(if shuffle_on {
-                            accent.linear_multiply(2.4)
-                        } else {
-                            ui.visuals().text_color()
-                        }),
-                    ))
-                    .clicked()
-                {
+                if sel_button(ui, shuffle_on, "🔀", on_bg, off_fg).clicked() {
                     player_app.player.send(PlayerCommand::ToggleShuffle);
                 }
 
-                if ui
-                    .add(egui::Button::selectable(
-                        repeat_on,
-                        egui::RichText::new("🔁").color(if repeat_on {
-                            accent.linear_multiply(2.4)
-                        } else {
-                            ui.visuals().text_color()
-                        }),
-                    ))
-                    .clicked()
-                {
+                if sel_button(ui, repeat_on, "🔁", on_bg, off_fg).clicked() {
                     player_app.player.send(PlayerCommand::ToggleRepeat);
                 }
 
-                if ui
-                    .add(egui::Button::selectable(
-                        repeat_one_on,
-                        egui::RichText::new("🔂").color(if repeat_one_on {
-                            accent.linear_multiply(2.4)
-                        } else {
-                            ui.visuals().text_color()
-                        }),
-                    ))
-                    .clicked()
-                {
+                if sel_button(ui, repeat_one_on, "🔂", on_bg, off_fg).clicked() {
                     player_app.player.send(PlayerCommand::ToggleRepeatOne);
                 }
             });
         });
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                if ui.button("🔄 rescan").clicked() {
+                if ui.add(egui::Button::new("🔄 rescan").fill(Color32::TRANSPARENT)).clicked() {
                     player_app.load_library_async();
                 }
-                if ui.button(if player_app.fullscreen { "🗖" } else { "🗗" }).clicked() {
+                if ui.add(egui::Button::new(if player_app.fullscreen { "🗖" } else { "🗗" }).fill(Color32::TRANSPARENT)).clicked() {
                     player_app.fullscreen = !player_app.fullscreen;
 
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(player_app.fullscreen));
                 }
-                if ui.button("⚙").clicked() {
+                if ui.add(egui::Button::new("⚙").fill(Color32::TRANSPARENT)).clicked() {
                     player_app.show_settings = true;
                 }
             });

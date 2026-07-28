@@ -1,54 +1,3 @@
-//! Per‑frame update loop (`eframe::App::update`).
-//!
-//! # Layout overview
-//!
-//! The [`update`](eframe::App::update) method paints everything inside an
-//! [`egui::CentralPanel`] whose background is a slanted vertical gradient
-//! (see [`draw_slanted_vertical_gradient`]).  Sub‑components are called as
-//! plain functions — there are no nested widget structs.
-//!
-//! The layout is roughly:
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────┐
-//! │  Album art  │  Buttons & title              │
-//! │  (cover)    │  ┌──────────┬──────────────┐  │
-//! │             │  │ Volume   │ Order btns   │  │
-//! │             │  │ bar      │ & expander   │  │
-//! │             │  ├──────────┴──────────────┤  │
-//! │             │  │ VU meters │ Search +    │  │
-//! │             │  │           │ miniplaylist│  │
-//! │             │  │           │ Spectrum    │  │
-//! │             │  └──────────┴──────────────┘  │
-//! ├─────────────────────────────────────────────┤
-//! │             Seek slider                     │
-//! ├─────────────────────────────────────────────┤
-//! │         Waveform / beat stripes             │
-//! └─────────────────────────────────────────────┘
-//! ```
-//!
-//! # Repaint scheduling
-//!
-//! Every frame calls
-//! `ctx.request_repaint_after(Duration::from_millis(16))` — both when playing
-//! and when paused — to keep the UI updating at roughly 60 fps.  The waveform,
-//! spectrum, and position slider all rely on this steady tick.
-//!
-//! # Data flow
-//!
-//! * **Player state** — `self.player.position()`, `.is_playing()`,
-//!   `.duration()`, `.samples()`, `.get_loudness()` are polled every frame.
-//! * **Shared samples** — `self.player.samples()` returns an `Arc` behind
-//!   which lives a lock‑free ring buffer written by the audio thread and read
-//!   by the UI thread.  Both the spectrum visualiser and the waveform
-//!   visualiser consume this buffer.
-//! * **Keyboard input** — [`handle_keyboard_input`] reads the current egui
-//!   input state and translates it to a [`PlayerCommand`] according to the
-//!   user's configured keybindings.
-//! * **Library loading** — if the playlist is empty,
-//!   [`PlayerApp::load_library_async`] is
-//!   called to kick off a background scan.
-
 use egui::{Color32, style::HandleShape};
 use player_core::{PlayerCommand, viz::waveform::synchronized_waveform};
 use std::time::Duration;
@@ -68,23 +17,6 @@ use crate::{
 };
 
 impl eframe::App for PlayerApp {
-    /// Called by eframe every time the window needs repainting.
-    ///
-    /// This method:
-    /// 1. Adjusts [`pixels_per_point`](egui::Context::set_pixels_per_point) so
-    ///    that the UI scales with the physical viewport width.
-    /// 2. Calls [`ensure_cover_loaded`](PlayerApp::ensure_cover_loaded) to
-    ///    update the colour theme if the track changed.
-    /// 3. Draws the slanted‑gradient background via
-    ///    [`draw_slanted_vertical_gradient`].
-    /// 4. Lays out all sub‑components (cover, buttons, volume bar, order
-    ///    buttons, EQ, VU meters, search + mini‑playlist, spectrum visualiser).
-    /// 5. Renders a seek slider that polls the core position and sends
-    ///    [`PlayerCommand::Seek`] on drag.
-    /// 6. Draws the synchronised waveform and beat stripes below the slider.
-    /// 7. Requests another repaint after 16 ms (~60 fps).
-    /// 8. If the playlist is empty, kicks off a background library scan.
-    /// 9. Handles keyboard shortcuts via [`handle_keyboard_input`].
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let physical_width = ctx.input(|i| i.viewport_rect().width() * i.pixels_per_point());
 
@@ -97,27 +29,35 @@ impl eframe::App for PlayerApp {
         let dt = ctx.input(|i| i.unstable_dt);
         self.bg_anim_t += dt;
 
-        for i in 0..3 {
-            let c = &self.target_palette_sorted[i];
-            let cur = &self.palette_sorted[i];
-            self.palette_sorted[i] = [
-                lerp_u8(cur[0], c[0], 0.08),
-                lerp_u8(cur[1], c[1], 0.08),
-                lerp_u8(cur[2], c[2], 0.08),
-            ];
-        }
-        let palette = self.palette_sorted.clone();
-        let panel =
-            Color32::from_rgba_unmultiplied_const(palette[2][0], palette[2][1], palette[2][2], 120);
-        let accent = panel.clone();
-        let accent = accent.gamma_multiply(1.2);
-        let text = Color32::from_rgb(palette[0][0], palette[0][1], palette[0][2]);
+        self.palette = self.palette.lerp(&self.target_palette, 0.08);
 
-        let anim = self.bg_anim_t * 0.04;
+        let current_path = self.current_track().map(|t| t.path);
+        if current_path != self.last_scrolled_track {
+            self.last_scrolled_track = current_path;
+            self.scroll_current_track = true;
+        }
+
+        let _surface_rgb = self.palette.surface;
+        let on_surface_rgb = self.palette.on_surface;
+        let primary_rgb = self.palette.primary;
+        let on_primary = self.palette.on_primary;
+        
+        let accent = Color32::from_rgba_unmultiplied_const(primary_rgb[0], primary_rgb[1], primary_rgb[2], 100);
+        let text = Color32::from_rgb(on_surface_rgb[0], on_surface_rgb[1], on_surface_rgb[2]);
+
+        let anim = self.bg_anim_t * 0.3;
         let shift = |v: u8| -> u8 {
             let s = (anim.sin() * 20.0) as i32;
             (v as i32 + s).clamp(0, 255) as u8
         };
+
+        let bg_top = Color32::from_rgb(
+            shift(primary_rgb[0]),
+            shift(primary_rgb[1]),
+            shift(primary_rgb[2]),
+        ).gamma_multiply(0.8);
+        let bg_bot = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]).gamma_multiply(0.8);
+        let wave_col = Color32::from_rgb(primary_rgb[0], primary_rgb[1], primary_rgb[2]).gamma_multiply(0.7);
 
         self.ensure_cover_loaded(&ctx, false);
         show_config_window(self, ctx, accent);
@@ -125,37 +65,20 @@ impl eframe::App for PlayerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
             let painter = ui.painter();
-            draw_slanted_vertical_gradient(
-                painter,
-                rect,
-                Color32::from_rgb(
-                    shift(palette[2][0]),
-                    shift(palette[2][1]),
-                    shift(palette[2][2]),
-                ),
-                Color32::from_rgb(
-                    shift(palette[1][0]),
-                    shift(palette[1][1]),
-                    shift(palette[1][2]),
-                ),
-                -6.0,
-            );
+            draw_slanted_vertical_gradient(painter, rect, bg_top, bg_bot, -12.0);
             ui.horizontal(|ui| {
                 show_cover(ui, self);
                 ui.vertical(|ui| {
-                    show_buttons_and_title(ui, ctx, self, self.text_color.clone(), accent);
+                    show_buttons_and_title(ui, ctx, self, text);
                     ui.horizontal(|ui| {
-                        // 1. EQ on the far left
-                        show_eq_controls(ui, self, accent, self.text_color);
-                        // 2. Everything else in a vertical column to the right
+                        show_eq_controls(ui, self, accent, text);
                         ui.vertical(|ui| {
-                            // Top row: Volume and Order
                             ui.horizontal(|ui| {
                                 show_volume_bar(ui, self);
-                                show_order_buttons(ui, self, accent, self.text_color);
+                                show_order_buttons(ui, self);
                                 ui.vertical(|ui|{
                                     ui.add_space(-6.0);
-                                    show_expander_knob(ui, self, self.text_color);
+                                    show_expander_knob(ui, self, text);
                                 });
                             });
                             ui.horizontal(|ui| {
@@ -166,14 +89,13 @@ impl eframe::App for PlayerApp {
                                     draw_vertical_meter(ui, ldness_l);
                                 });
                                 ui.vertical(|ui| {
-                                    show_search_and_miniplaylist(ui, self, accent);
+                                    show_search_and_miniplaylist(ui, self);
                                     let samples = self.player.samples();
-                                    let palette = &self.palette_sorted;
 
                                     self.visualizer.draw_spectrum(
                                         ui,
                                         samples,
-                                        palette,
+                                        &self.palette,
                                     );
                                 });
                             });
@@ -201,6 +123,9 @@ impl eframe::App for PlayerApp {
                     )),
                 );
                 ui.style_mut().spacing.slider_width = available;
+                let on_primary_col = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]);
+                let prev_inactive = ui.style().visuals.widgets.inactive.bg_fill;
+                ui.style_mut().visuals.widgets.inactive.bg_fill = on_primary_col;
                 let response = ui.add_enabled(
                     has_track,
                     egui::Slider::new(&mut pos, 0.0..=duration)
@@ -211,6 +136,7 @@ impl eframe::App for PlayerApp {
                         })
                         .trailing_fill(true),
                 );
+                ui.style_mut().visuals.widgets.inactive.bg_fill = prev_inactive;
                 ui.add_sized(
                     [38.0, 20.5],
                     egui::Label::new(format!(
@@ -246,16 +172,11 @@ impl eframe::App for PlayerApp {
                 self.player.get_sample_rate(),
                 &mut self.visualizer.last_period,
             );
-            let palette = &self.palette_sorted;
 
-            draw_waveform_raw(
-                &painter,
-                rect,
-                &wave,
-                Color32::from_rgb(palette[0][0], palette[0][1], palette[0][2]).gamma_multiply(0.6),
-                Color32::TRANSPARENT,
-            );
-            self.visualizer.draw_beat_stripes(ui, accent, text);
+            draw_waveform_raw(&painter, rect, &wave, wave_col, Color32::TRANSPARENT);
+
+            let on_primary_color = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]);
+            self.visualizer.draw_beat_stripes(ui, accent, on_primary_color);
             if self.player.is_playing() {
                 self.state = "status: Playing";
                 self.just_executed = false;
@@ -267,20 +188,17 @@ impl eframe::App for PlayerApp {
 
             if self.player.playlist().is_empty() {
                 self.load_library_async();
+            } else if self.library_loading {
+                self.library_loading = false;
             }
 
-            // Handle keyboard input
             let config = self.config.lock().unwrap();
             let keybindings = config.keybindings.clone();
             drop(config);
-            
+
             if let Some(cmd) = handle_keyboard_input(ctx, &keybindings, self.player.is_playing()) {
                 self.player.send(cmd);
             }
         });
     }
-}
-
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t) as u8
 }

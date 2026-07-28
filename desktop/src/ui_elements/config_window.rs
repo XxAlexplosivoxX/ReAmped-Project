@@ -1,8 +1,87 @@
 use egui::{Color32, Context};
-use player_core::config::save_config;
+use player_core::config::{save_config, M3Palette, ThemeSource};
 
 use crate::{ui_elements::music_dirs::draw_music_dirs, player::player_app_init::PlayerApp};
 
+macro_rules! m3_role {
+    ($name:expr, $get:ident, $get_mut:ident) => {
+        ($name, |p: &M3Palette| &p.$get, |p: &mut M3Palette| &mut p.$get_mut)
+    };
+}
+
+/// All M3 colour roles in display order.
+const M3_ROLES: &[(&str, fn(&M3Palette) -> &[u8; 3], fn(&mut M3Palette) -> &mut [u8; 3])] = &[
+    m3_role!("Primary", primary, primary),
+    m3_role!("On-Primary", on_primary, on_primary),
+    m3_role!("Primary Container", primary_container, primary_container),
+    m3_role!("On-Primary Container", on_primary_container, on_primary_container),
+    m3_role!("Secondary", secondary, secondary),
+    m3_role!("On-Secondary", on_secondary, on_secondary),
+    m3_role!("Secondary Container", secondary_container, secondary_container),
+    m3_role!("On-Secondary Container", on_secondary_container, on_secondary_container),
+    m3_role!("Tertiary", tertiary, tertiary),
+    m3_role!("On-Tertiary", on_tertiary, on_tertiary),
+    m3_role!("Tertiary Container", tertiary_container, tertiary_container),
+    m3_role!("On-Tertiary Container", on_tertiary_container, on_tertiary_container),
+    m3_role!("Error", error, error),
+    m3_role!("On-Error", on_error, on_error),
+    m3_role!("Error Container", error_container, error_container),
+    m3_role!("On-Error Container", on_error_container, on_error_container),
+    m3_role!("Surface", surface, surface),
+    m3_role!("On-Surface", on_surface, on_surface),
+    m3_role!("Surface Variant", surface_variant, surface_variant),
+    m3_role!("On-Surface Variant", on_surface_variant, on_surface_variant),
+    m3_role!("Outline", outline, outline),
+    m3_role!("Outline Variant", outline_variant, outline_variant),
+    m3_role!("Background", background, background),
+    m3_role!("On-Background", on_background, on_background),
+];
+
+fn draw_role_editor(
+    ui: &mut egui::Ui,
+    _name: &str,
+    color: &mut [u8; 3],
+    label: &str,
+    expanded: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        let swatch = Color32::from_rgb(color[0], color[1], color[2]);
+        let resp = ui.colored_label(swatch, "████");
+        if resp.clicked() {
+            *expanded = !*expanded;
+        }
+        ui.label(label);
+    });
+
+    if *expanded {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                let mut r = color[0] as f32 / 255.0;
+                let mut g = color[1] as f32 / 255.0;
+                let mut b = color[2] as f32 / 255.0;
+                ui.add(
+                    egui::Slider::new(&mut r, 0.0..=1.0)
+                        .text("R")
+                        .fixed_decimals(0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut g, 0.0..=1.0)
+                        .text("G")
+                        .fixed_decimals(0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut b, 0.0..=1.0)
+                        .text("B")
+                        .fixed_decimals(0),
+                );
+                color[0] = (r * 255.0) as u8;
+                color[1] = (g * 255.0) as u8;
+                color[2] = (b * 255.0) as u8;
+            });
+        });
+    }
+}
 
 pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32) {
     if player.show_settings {
@@ -56,251 +135,41 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             ui.heading("Configuración del tema");
                             ui.separator();
 
-                            if ui
-                                .checkbox(&mut cfg.theme.follow_cover, "cambiar colores por cover")
-                                .changed()
-                            {
+                            // Theme source selector
+                            let prev_source = cfg.theme.source.clone();
+                            ui.label("Fuente de la paleta de colores:");
+                            ui.radio_value(&mut cfg.theme.source, ThemeSource::AlbumCover, "Portada del tema (AlbumCover)");
+                            ui.radio_value(&mut cfg.theme.source, ThemeSource::SystemWallpaper, "Fondo de pantalla (SystemWallpaper)");
+                            ui.radio_value(&mut cfg.theme.source, ThemeSource::Manual, "Ajuste manual (Manual)");
+
+                            if cfg.theme.source != prev_source {
                                 save_config(&cfg);
                                 reload_cover = true;
                             }
 
-                            if !cfg.theme.follow_cover {
-                                ui.label("primer color de la paleta");
+                            ui.add_space(6.0);
 
-                                let color = egui::Color32::from_rgb(
-                                    (player.rgb1[0] * 255.0) as u8,
-                                    (player.rgb1[1] * 255.0) as u8,
-                                    (player.rgb1[2] * 255.0) as u8,
-                                );
-
-                                if ui.colored_label(color, "██████").clicked() {
-                                    player.show_picker1 = true;
+                            // Manual colour-role editors
+                            if cfg.theme.source == ThemeSource::Manual {
+                                ui.label("Roles de color M3 (haz clic en ████ para expandir):");
+                                for (label, _, get_mut) in M3_ROLES {
+                                    let key = format!("theme_{}", label);
+                                    let mut expanded = player.expanded_roles.contains(&key);
+                                    let color: &mut [u8; 3] = get_mut(&mut cfg.theme.palette);
+                                    draw_role_editor(ui, label, color, label, &mut expanded);
+                                    if expanded {
+                                        player.expanded_roles.insert(key.clone());
+                                    } else {
+                                        player.expanded_roles.remove(&key);
+                                    }
                                 }
-
-                                ui.label("segundo color de la paleta");
-
-                                let color = egui::Color32::from_rgb(
-                                    (player.rgb2[0] * 255.0) as u8,
-                                    (player.rgb2[1] * 255.0) as u8,
-                                    (player.rgb2[2] * 255.0) as u8,
-                                );
-
-                                if ui.colored_label(color, "██████").clicked() {
-                                    player.show_picker2 = true;
+                                ui.add_space(4.0);
+                                if ui.button("Guardar paleta manual").clicked() {
+                                    cfg.theme.source = ThemeSource::Manual;
+                                    // Copy the current palette from config to ensure it's saved
+                                    save_config(&cfg);
+                                    reload_cover = true;
                                 }
-
-                                ui.label("tercer color de la paleta");
-
-                                let color = egui::Color32::from_rgb(
-                                    (player.rgb3[0] * 255.0) as u8,
-                                    (player.rgb3[1] * 255.0) as u8,
-                                    (player.rgb3[2] * 255.0) as u8,
-                                );
-
-                                if ui.colored_label(color, "██████").clicked() {
-                                    player.show_picker3 = true;
-                                }
-
-                                let mut open_picker1 = player.show_picker1;
-                                if open_picker1 {
-                                    egui::Window::new("")
-                                        .title_bar(false)
-                                        .resizable(false)
-                                        .collapsible(false)
-                                        .fixed_size(egui::vec2(200.0, 160.0))
-                                        .movable(true)
-                                        .frame({
-                                            let mut frame = egui::Frame::window(&ctx.style());
-
-                                            frame.fill = accent.linear_multiply(1.2);
-                                            frame.fill = egui::Color32::from_rgba_unmultiplied(
-                                                frame.fill.r(),
-                                                frame.fill.g(),
-                                                frame.fill.b(),
-                                                210,
-                                            );
-
-                                            frame
-                                        })
-                                        .show(ctx, |ui| {
-                                            ui.vertical_centered(|ui| {
-                                                ui.heading("Color 1");
-
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb1[0], 0.0..=1.0)
-                                                        .text("R"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb1[1], 0.0..=1.0)
-                                                        .text("G"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb1[2], 0.0..=1.0)
-                                                        .text("B"),
-                                                );
-
-                                                ui.add_space(6.0);
-
-                                                let color = egui::Color32::from_rgb(
-                                                    (player.rgb1[0] * 255.0) as u8,
-                                                    (player.rgb1[1] * 255.0) as u8,
-                                                    (player.rgb1[2] * 255.0) as u8,
-                                                );
-
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Preview");
-                                                    ui.colored_label(color, "██████");
-                                                });
-
-                                                ui.add_space(8.0);
-
-                                                if ui.button("OK").clicked() {
-                                                    cfg.theme.pallete_custom[0] = [
-                                                        (player.rgb1[0] * 255.0) as u8,
-                                                        (player.rgb1[1] * 255.0) as u8,
-                                                        (player.rgb1[2] * 255.0) as u8,
-                                                    ];
-                                                    save_config(&cfg);
-                                                    open_picker1 = false;
-                                                }
-                                            });
-                                        });
-                                }
-                                player.show_picker1 = open_picker1;
-
-                                let mut open_picker2 = player.show_picker2;
-                                if open_picker2 {
-                                    egui::Window::new("")
-                                        .title_bar(false)
-                                        .resizable(false)
-                                        .collapsible(false)
-                                        .movable(true)
-                                        .fixed_size(egui::vec2(200.0, 160.0))
-                                        .frame({
-                                            let mut frame = egui::Frame::window(&ctx.style());
-
-                                            frame.fill = accent.linear_multiply(1.2);
-                                            frame.fill = egui::Color32::from_rgba_unmultiplied(
-                                                frame.fill.r(),
-                                                frame.fill.g(),
-                                                frame.fill.b(),
-                                                210,
-                                            );
-
-                                            frame
-                                        })
-                                        .show(ctx, |ui| {
-                                            ui.vertical_centered(|ui| {
-                                                ui.heading("Color 2");
-
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb2[0], 0.0..=1.0)
-                                                        .text("R"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb2[1], 0.0..=1.0)
-                                                        .text("G"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb2[2], 0.0..=1.0)
-                                                        .text("B"),
-                                                );
-
-                                                ui.add_space(6.0);
-
-                                                let color = egui::Color32::from_rgb(
-                                                    (player.rgb2[0] * 255.0) as u8,
-                                                    (player.rgb2[1] * 255.0) as u8,
-                                                    (player.rgb2[2] * 255.0) as u8,
-                                                );
-
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Preview");
-                                                    ui.colored_label(color, "██████");
-                                                });
-
-                                                ui.add_space(8.0);
-
-                                                if ui.button("OK").clicked() {
-                                                    cfg.theme.pallete_custom[1] = [
-                                                        (player.rgb2[0] * 255.0) as u8,
-                                                        (player.rgb2[1] * 255.0) as u8,
-                                                        (player.rgb2[2] * 255.0) as u8,
-                                                    ];
-                                                    save_config(&cfg);
-                                                    open_picker2 = false;
-                                                }
-                                            });
-                                        });
-                                }
-                                player.show_picker2 = open_picker2;
-
-                                let mut open_picker3 = player.show_picker3;
-                                if open_picker3 {
-                                    egui::Window::new("")
-                                        .title_bar(false)
-                                        .resizable(false)
-                                        .collapsible(false)
-                                        .fixed_size(egui::vec2(200.0, 160.0))
-                                        .movable(true)
-                                        .frame({
-                                            let mut frame = egui::Frame::window(&ctx.style());
-
-                                            frame.fill = accent.linear_multiply(1.2);
-                                            frame.fill = egui::Color32::from_rgba_unmultiplied(
-                                                frame.fill.r(),
-                                                frame.fill.g(),
-                                                frame.fill.b(),
-                                                210,
-                                            );
-
-                                            frame
-                                        })
-                                        .show(ctx, |ui| {
-                                            ui.vertical_centered(|ui| {
-                                                ui.heading("Color 3");
-
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb3[0], 0.0..=1.0)
-                                                        .text("R"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb3[1], 0.0..=1.0)
-                                                        .text("G"),
-                                                );
-                                                ui.add(
-                                                    egui::Slider::new(&mut player.rgb3[2], 0.0..=1.0)
-                                                        .text("B"),
-                                                );
-
-                                                ui.add_space(6.0);
-
-                                                let color = egui::Color32::from_rgb(
-                                                    (player.rgb3[0] * 255.0) as u8,
-                                                    (player.rgb3[1] * 255.0) as u8,
-                                                    (player.rgb3[2] * 255.0) as u8,
-                                                );
-
-                                                ui.horizontal(|ui| {
-                                                    ui.label("Preview");
-                                                    ui.colored_label(color, "██████");
-                                                });
-
-                                                ui.add_space(8.0);
-
-                                                if ui.button("OK").clicked() {
-                                                    cfg.theme.pallete_custom[2] = [
-                                                        (player.rgb3[0] * 255.0) as u8,
-                                                        (player.rgb3[1] * 255.0) as u8,
-                                                        (player.rgb3[2] * 255.0) as u8,
-                                                    ];
-                                                    save_config(&cfg);
-                                                    open_picker3 = false;
-                                                }
-                                            });
-                                        });
-                                }
-                                player.show_picker3 = open_picker3;
                             }
 
                             ui.add_space(10.0);
@@ -381,7 +250,7 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             ui.separator();
 
                             ui.label("Presiona una tecla y selecciona la acción:");
-                            
+
                             let default_bindings = [
                                 ("Space", "Play/Pause"),
                                 ("ArrowRight", "Siguiente canción"),

@@ -427,6 +427,46 @@ fn compute_rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+/// Snap a trigger position to the nearest rising-edge zero-crossing (negative →
+/// non-negative) within ±half a period.
+///
+/// Uses sub-sample precision via [`find_cubic_root`].  If no rising crossing is
+/// found in the search window, the original trigger is returned unchanged.
+fn snap_to_rising_zero(samples: &[f32], trigger: f32, period: f32) -> f32 {
+    let len = samples.len();
+    if len < 4 || period < 2.0 {
+        return trigger;
+    }
+
+    let search = (period * 0.5).ceil() as isize;
+    let center = trigger.round() as isize;
+    let start = (center - search).max(1) as usize;
+    let end = (center + search).min(len as isize - 2) as usize;
+
+    let mut best_dist = f32::MAX;
+    let mut best_pos = trigger;
+
+    let mut i = start.max(1);
+    while i <= end && i < len - 1 {
+        if samples[i - 1] < 0.0 && samples[i] >= 0.0 {
+            let y0 = if i >= 2 { samples[i - 2] } else { samples[i - 1] };
+            let y1 = samples[i - 1];
+            let y2 = samples[i];
+            let y3 = if i + 1 < len { samples[i + 1] } else { samples[i] };
+            let t = find_cubic_root(y0, y1, y2, y3);
+            let pos = (i - 1) as f32 + t;
+            let dist = (pos - trigger).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_pos = pos;
+            }
+        }
+        i += 1;
+    }
+
+    best_pos
+}
+
 /// Extract a synchronised (trigger-aligned) waveform window from a stereo
 /// ring buffer.
 ///
@@ -525,6 +565,8 @@ pub fn synchronized_waveform(
         let trigger = trigger.or_else(|| find_peak_position(&rb.filtered, 0));
 
         let trigger = trigger.unwrap_or(0.0);
+
+        let trigger = snap_to_rising_zero(&rb.filtered, trigger, period);
 
         let remaining = rb.mono.len() as f32 - trigger;
         let actual_window = window_size.min(remaining as usize).max(4);
