@@ -104,18 +104,20 @@ impl SpectrumVisualizer {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
         let painter = ui.painter_at(rect).with_clip_rect(rect);
 
-        painter.rect_filled(rect, 6.0, Color32::TRANSPARENT);
+        let bg = Color32::TRANSPARENT;
+        painter.rect_filled(rect, 6.0, bg);
 
         if old_style {
             let mut bands =
                 log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
 
-            let alpha = 0.65;
             if smooth_enabled {
                 bands = smooth_spatial(&bands);
             }
 
-            for (s, &v) in self.state.smooth.iter_mut().zip(bands.iter()) {
+            let n = self.state.smooth.len();
+            for (i, (s, &v)) in self.state.smooth.iter_mut().zip(bands.iter()).enumerate() {
+                let alpha = 0.9 - (i as f32 / n as f32) * 0.4;
                 *s = *s * alpha + v * (1.0 - alpha);
             }
 
@@ -165,12 +167,13 @@ impl SpectrumVisualizer {
             let mut bands =
                 log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
 
-            let alpha = 0.65;
             if smooth_enabled {
                 bands = smooth_spatial(&bands);
             }
 
-            for (s, &v) in self.state.smooth.iter_mut().zip(bands.iter()) {
+            let n = self.state.smooth.len();
+            for (i, (s, &v)) in self.state.smooth.iter_mut().zip(bands.iter()).enumerate() {
+                let alpha = 0.9 - (i as f32 / n as f32) * 0.4;
                 *s = *s * alpha + v * (1.0 - alpha);
             }
 
@@ -299,7 +302,8 @@ impl SpectrumVisualizer {
         }
 
         if response.hovered() {
-            self.draw_spectrum_hover(&painter, rect, &raw, fft_size, sample_rate, response);
+            let text_col = Color32::from_rgb(palette.on_primary[0], palette.on_primary[1], palette.on_primary[2]);
+            self.draw_spectrum_hover(&painter, rect, &raw, fft_size, sample_rate, response, text_col);
         }
     }
 
@@ -311,6 +315,7 @@ impl SpectrumVisualizer {
         fft_size: usize,
         sample_rate: f32,
         response: egui::Response,
+        text_color: Color32,
     ) {
         let cursor_pos = match response.hover_pos() {
             Some(p) if rect.contains(p) => p,
@@ -337,30 +342,30 @@ impl SpectrumVisualizer {
         let text = format!("{:.2}dB  {}  {}", amp, format_freq(freq), note);
 
         let font = egui::FontId::proportional(10.0);
-        let pad = 6.0;
-        let panel_h = 20.0;
-        let panel_w = (text.len() as f32 * 6.5 + pad * 2.0).min(260.0);
-
-        let mut px = cursor_pos.x + 12.0;
-        let mut py = cursor_pos.y - panel_h - 8.0;
-        if px + panel_w > rect.right() {
-            px = cursor_pos.x - panel_w - 12.0;
-        }
-        if py < rect.top() + 4.0 {
+        let text_w = text.len() as f32 * 5.5;
+        let gap = 6.0;
+        let (px, align) = if cursor_pos.x + gap + text_w <= rect.right() {
+            (cursor_pos.x + gap, egui::Align2::LEFT_TOP)
+        } else {
+            (cursor_pos.x - gap, egui::Align2::RIGHT_TOP)
+        };
+        let mut py = cursor_pos.y - 22.0;
+        if py < rect.top() + 2.0 {
             py = cursor_pos.y + 12.0;
         }
-        px = px.max(rect.left() + 2.0);
-        py = py.max(rect.top() + 2.0);
 
-        let panel_rect = Rect::from_min_size(Pos2::new(px, py), egui::vec2(panel_w, panel_h));
-        painter.rect_filled(panel_rect, 4.0, self.tooltip.bg);
-        painter.rect_stroke(panel_rect, 4.0, Stroke::new(1.0, self.tooltip.border), egui::StrokeKind::Outside);
+        let px = match align {
+            egui::Align2::LEFT_TOP => px.clamp(rect.left() + gap, rect.right() - gap - text_w),
+            egui::Align2::RIGHT_TOP => px.clamp(rect.left() + gap + text_w, rect.right() - gap),
+            _ => px,
+        };
+
         painter.text(
-            Pos2::new(px + pad, py + (panel_h - 14.0) * 0.5),
-            egui::Align2::LEFT_CENTER,
+            Pos2::new(px, py),
+            align,
             &text,
             font,
-            self.tooltip.text,
+            text_color,
         );
     }
 
@@ -577,18 +582,6 @@ fn ln_mag_to_db(ln_val: f32) -> f32 {
     20.0 * ln_val / std::f32::consts::LN_10
 }
 
-fn relative_luminance(c: [u8; 3]) -> f32 {
-    fn linearize(v: u8) -> f32 {
-        let s = v as f32 / 255.0;
-        if s <= 0.03928 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * linearize(c[0]) + 0.7152 * linearize(c[1]) + 0.0722 * linearize(c[2])
-}
-
 fn freq_to_x_frac(freq: f32) -> f32 {
     (freq.ln() - SPECTRUM_F_MIN.ln()) / (SPECTRUM_F_MAX.ln() - SPECTRUM_F_MIN.ln())
 }
@@ -603,9 +596,6 @@ fn freq_to_bin(freq: f32, sample_rate: f32, fft_size: usize) -> usize {
 
 #[derive(Clone, Debug)]
 pub struct TooltipColors {
-    pub bg: Color32,
-    pub text: Color32,
-    pub border: Color32,
     pub grid_line: Color32,
     pub grid_text: Color32,
     pub cursor: Color32,
@@ -613,32 +603,10 @@ pub struct TooltipColors {
 
 impl TooltipColors {
     pub fn from_palette(palette: &M3Palette) -> Self {
-        let bg_lum = relative_luminance(palette.surface);
-        let is_light = bg_lum > 0.5;
-
-        let (bg, text) = if is_light {
-            let c = palette.on_surface;
-            (Color32::from_rgb(c[0], c[1], c[2]), Color32::WHITE)
-        } else {
-            let bg_c = palette.surface;
-            let tc = palette.on_surface;
-            (
-                Color32::from_rgb(
-                    bg_c[0].max(80),
-                    bg_c[1].max(80),
-                    bg_c[2].max(80),
-                ),
-                Color32::from_rgb(tc[0].max(30), tc[1].max(30), tc[2].max(30)),
-            )
-        };
-
         let accent = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
         let on_surface = Color32::from_rgb(palette.on_surface[0], palette.on_surface[1], palette.on_surface[2]);
 
         Self {
-            bg,
-            text,
-            border: accent.linear_multiply(0.7),
             grid_line: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 51),
             grid_text: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 102),
             cursor: Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 102),

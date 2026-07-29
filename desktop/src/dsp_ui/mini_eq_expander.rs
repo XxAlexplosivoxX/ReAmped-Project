@@ -1,6 +1,6 @@
 use crate::player::player_app_init::PlayerApp;
 use egui::{Color32, RichText, Sense, Stroke, Ui, Vec2};
-use player_core::PlayerCommand;
+use player_core::{PlayerCommand, config::save_config};
 use std::f32::consts::PI;
 
 pub fn show_eq_controls(ui: &mut Ui, player: &mut PlayerApp, _accent: Color32, text: Color32) {
@@ -17,20 +17,32 @@ pub fn show_eq_controls(ui: &mut Ui, player: &mut PlayerApp, _accent: Color32, t
                 .inner_margin(egui::Margin::same(0))
                 .show(ui, |ui| {
                     ui.add_space(7.5);
+                    let save = |p: &mut PlayerApp| {
+                        if let Ok(mut cfg) = p.config.lock() {
+                            cfg.high_val = p.high_val;
+                            cfg.mid_val = p.mid_val;
+                            cfg.bass_val = p.bass_val;
+                            cfg.width_val = p.width_val;
+                            save_config(&cfg);
+                        }
+                    };
                     if draw_real_knob(ui, "H", &mut player.high_val, text, on_p).changed() {
                         player
                             .player
                             .send(PlayerCommand::SetGainHigh(player.high_val));
+                        save(player);
                     }
                     if draw_real_knob(ui, "M", &mut player.mid_val, text, on_p).changed() {
                         player
                             .player
                             .send(PlayerCommand::SetGainMid(player.mid_val));
+                        save(player);
                     }
                     if draw_real_knob(ui, "B", &mut player.bass_val, text, on_p).changed() {
                         player
                             .player
                             .send(PlayerCommand::SetGainBass(player.bass_val));
+                        save(player);
                     }
                 });
         });
@@ -47,6 +59,10 @@ pub fn show_expander_knob(ui: &mut Ui, player: &mut PlayerApp, color: Color32) {
         player
             .player
             .send(PlayerCommand::SetExpanderWidth(player.width_val));
+        if let Ok(mut cfg) = player.config.lock() {
+            cfg.width_val = player.width_val;
+            save_config(&cfg);
+        }
     }
 }
 

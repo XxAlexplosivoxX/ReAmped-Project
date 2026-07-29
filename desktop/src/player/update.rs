@@ -59,8 +59,16 @@ impl eframe::App for PlayerApp {
         let bg_bot = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]).gamma_multiply(0.8);
         let wave_col = Color32::from_rgb(primary_rgb[0], primary_rgb[1], primary_rgb[2]).gamma_multiply(0.7);
 
+        self.apply_pending_cover(&ctx);
         self.ensure_cover_loaded(&ctx, false);
         show_config_window(self, ctx, accent);
+
+        {
+            let cfg = self.config.lock().unwrap();
+            let fps = cfg.target_fps.max(1).min(240);
+            let interval = Duration::from_millis((1000 / fps) as u64);
+            ctx.request_repaint_after(interval);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
@@ -91,7 +99,6 @@ impl eframe::App for PlayerApp {
                                 ui.vertical(|ui| {
                                     show_search_and_miniplaylist(ui, self);
                                     let samples = self.player.samples();
-
                                     self.visualizer.draw_spectrum(
                                         ui,
                                         samples,
@@ -173,18 +180,17 @@ impl eframe::App for PlayerApp {
                 &mut self.visualizer.last_period,
             );
 
-            draw_waveform_raw(&painter, rect, &wave, wave_col, Color32::TRANSPARENT);
+            draw_waveform_raw(&painter, rect, &wave, wave_col, Color32::from_black_alpha(25));
 
             let on_primary_color = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]);
             self.visualizer.draw_beat_stripes(ui, accent, on_primary_color);
+
             if self.player.is_playing() {
                 self.state = "status: Playing";
                 self.just_executed = false;
             } else {
                 self.state = "status: Paused"
             }
-
-            ctx.request_repaint_after(Duration::from_millis(16));
 
             if self.player.playlist().is_empty() {
                 self.load_library_async();

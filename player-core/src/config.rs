@@ -53,7 +53,25 @@ pub struct AppConfig {
     pub music_dirs: Vec<std::path::PathBuf>,
     /// User-customisable keyboard bindings.
     pub keybindings: KeyBindings,
+    /// EQ bass gain (0.0–2.0, default 1.0).
+    #[serde(default = "default_eq_gain")]
+    pub bass_val: f32,
+    /// EQ mid gain (0.0–2.0, default 1.0).
+    #[serde(default = "default_eq_gain")]
+    pub mid_val: f32,
+    /// EQ high gain (0.0–2.0, default 1.0).
+    #[serde(default = "default_eq_gain")]
+    pub high_val: f32,
+    /// Stereo expander width (0.0–2.0, default 1.0).
+    #[serde(default = "default_eq_gain")]
+    pub width_val: f32,
+    /// Target frames per second for the UI (when focused).
+    #[serde(default = "default_fps")]
+    pub target_fps: u32,
 }
+
+fn default_eq_gain() -> f32 { 1.0 }
+fn default_fps() -> u32 { 60 }
 
 /// Source of the colour theme palette.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -202,6 +220,11 @@ impl Default for AppConfig {
             spectrum_smooth: false,
             music_dirs: Vec::new(),
             keybindings: KeyBindings::default(),
+            bass_val: 1.0,
+            mid_val: 1.0,
+            high_val: 1.0,
+            width_val: 1.0,
+            target_fps: default_fps(),
         }
     }
 }

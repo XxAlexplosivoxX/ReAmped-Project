@@ -46,14 +46,7 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 let play_on = player_app.player.is_playing();
 
                 if ui.add(egui::Button::new("⏮").fill(Color32::TRANSPARENT)).clicked() {
-                    let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Prev);
-                    for _ in 0..50 {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        if player_app.player.playlist_idx() != old_idx {
-                            break;
-                        }
-                    }
                     player_app.ensure_cover_loaded(ctx, true);
                     ctx.request_repaint();
                 }
@@ -71,14 +64,7 @@ pub fn show_buttons_and_title(ui: &mut Ui, ctx: &Context, player_app: &mut Playe
                 }
 
                 if ui.add(egui::Button::new("⏭").fill(Color32::TRANSPARENT)).clicked() {
-                    let old_idx = player_app.player.playlist_idx();
                     player_app.player.send(PlayerCommand::Next);
-                    for _ in 0..50 {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        if player_app.player.playlist_idx() != old_idx {
-                            break;
-                        }
-                    }
                     player_app.ensure_cover_loaded(ctx, true);
                     ctx.request_repaint();
                 }

@@ -41,7 +41,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         vsync: true,
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([550.0, 300.0])
+            .with_inner_size([550.0, 310.0])
             .with_resizable(false)
             .with_decorations(true),
         ..Default::default()

@@ -1,19 +1,27 @@
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
-use std::{thread, time::Duration};
-use egui::Color32;
+use std::time::Duration;
+use std::thread;
+use egui::{Color32, ColorImage};
 use player_core::{
-    Player, PlayerBuilder, PlayerCommand, Track, Options,
+    Player, PlayerBuilder, PlayerCommand, Track, Options, metadata::CoverArt,
 };
 use player_core::config::{AppConfig, load_config, M3Palette, ThemeSource};
 use player_core::metadata::is_default_cover;
 use crate::utils::{
-    load_cover::load_cover_texture,
     media_controls::{MediaControls, MediaSnapshot},
     misc::{extract_palette, extract_palette_from_bytes, find_folder_cover, get_system_wallpaper_buffer},
     visualizer::SpectrumVisualizer,
     scan_music_dirs::scan_music_dirs,
 };
+
+pub struct CoverWorkResult {
+    pub cover_data: Vec<u8>,
+    pub color_image: Option<ColorImage>,
+    pub palette: M3Palette,
+}
+
+pub type SharedCoverResult = Arc<Mutex<Option<CoverWorkResult>>>;
 
 #[derive(Clone)]
 pub struct PlayerApp {
@@ -51,6 +59,7 @@ pub struct PlayerApp {
     pub expanded_roles: HashSet<String>,
     pub show_palette_debug: bool,
     pub last_scrolled_track: Option<std::path::PathBuf>,
+    pub pending_cover_result: SharedCoverResult,
 }
 
 impl Default for PlayerApp {
@@ -86,10 +95,10 @@ impl PlayerApp {
             config,
             search_str: String::from(""),
             sort_option: Options::Normal,
-            bass_val: 1.0,
-            mid_val: 1.0,
-            high_val: 1.0,
-            width_val: 1.0,
+            bass_val: config_values.bass_val,
+            mid_val: config_values.mid_val,
+            high_val: config_values.high_val,
+            width_val: config_values.width_val,
             startup_tracks,
             library_loading: false,
             scroll_current_track: false,
@@ -100,7 +109,13 @@ impl PlayerApp {
             expanded_roles: HashSet::new(),
             show_palette_debug: false,
             last_scrolled_track: None,
+            pending_cover_result: Arc::new(Mutex::new(None)),
         };
+
+        app.player.send(PlayerCommand::SetGainBass(app.bass_val));
+        app.player.send(PlayerCommand::SetGainMid(app.mid_val));
+        app.player.send(PlayerCommand::SetGainHigh(app.high_val));
+        app.player.send(PlayerCommand::SetExpanderWidth(app.width_val));
 
         app.spawn_media_sync_thread();
         app
@@ -127,6 +142,8 @@ impl PlayerApp {
             }
         });
     }
+
+
 
     fn apply_m3_visuals(palette: &M3Palette, ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
@@ -181,40 +198,65 @@ impl PlayerApp {
         pl.get(idx).cloned()
     }
 
-    pub fn ensure_cover_loaded(&mut self, ctx: &egui::Context, ovride: bool) {
-        let cfg = self.config.lock().unwrap();
+    pub fn ensure_cover_loaded(&mut self, _ctx: &egui::Context, ovride: bool) {
         let cover = self.player.cover();
-
         let should_reload = ovride || self.previous_cover_data != cover.data;
 
         if should_reload {
-            self.cover_texture = Some(load_cover_texture(ctx, &cover).unwrap());
             self.previous_cover_data = cover.data.clone();
 
-            match cfg.theme.source {
-                ThemeSource::AlbumCover => {
-                    let folder_palette = is_default_cover(&cover).then(|| {
-                        self.current_track()
-                            .and_then(|t| find_folder_cover(&t.path))
-                            .and_then(|b| extract_palette_from_bytes(&b))
-                    }).flatten();
-                    self.target_palette = folder_palette.unwrap_or_else(|| extract_palette(cover));
-                }
-                ThemeSource::SystemWallpaper => {
-                    if let Some(buf) = get_system_wallpaper_buffer() {
-                        if let Some(p) = extract_palette_from_bytes(&buf) {
-                            self.target_palette = p;
-                        }
-                    }
-                }
-                ThemeSource::Manual => {
-                    self.target_palette = cfg.theme.palette.clone();
-                }
-            }
+            let cfg = self.config.lock().unwrap().clone();
+            let cover_data = cover.data.clone();
+            let cover_mime = cover.mime.clone();
+            let current_track = self.current_track().map(|t| t.path);
+            let is_default = is_default_cover(&cover);
+            let result = self.pending_cover_result.clone();
 
-            let palette = self.target_palette.clone();
-            self.text_color = Color32::from_rgb(palette.on_surface[0], palette.on_surface[1], palette.on_surface[2]);
-            Self::apply_m3_visuals(&palette, ctx);
+            thread::spawn(move || {
+                let color_image = image::load_from_memory(&cover_data).ok().map(|img| {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba)
+                });
+
+                let src = CoverArt { data: cover_data.clone(), mime: cover_mime };
+                let palette = match cfg.theme.source {
+                    ThemeSource::AlbumCover => {
+                        let folder = is_default.then(|| {
+                            current_track.as_ref()
+                                .and_then(|p| find_folder_cover(p))
+                                .and_then(|b| extract_palette_from_bytes(&b))
+                        }).flatten();
+                        folder.unwrap_or_else(|| extract_palette(src))
+                    }
+                    ThemeSource::SystemWallpaper => {
+                        get_system_wallpaper_buffer()
+                            .and_then(|b| extract_palette_from_bytes(&b))
+                            .unwrap_or_else(|| extract_palette(src))
+                    }
+                    ThemeSource::Manual => cfg.theme.palette.clone(),
+                };
+
+                let mut lock = result.lock().unwrap();
+                *lock = Some(CoverWorkResult { cover_data, color_image, palette });
+            });
+        }
+    }
+
+    pub fn apply_pending_cover(&mut self, ctx: &egui::Context) {
+        let mut lock = self.pending_cover_result.lock().unwrap();
+        if let Some(result) = lock.take() {
+            self.previous_cover_data = result.cover_data;
+            if let Some(image) = result.color_image {
+                self.cover_texture = Some(ctx.load_texture("cover_art", image, Default::default()));
+            }
+            self.target_palette = result.palette.clone();
+            self.text_color = Color32::from_rgb(
+                result.palette.on_surface[0],
+                result.palette.on_surface[1],
+                result.palette.on_surface[2],
+            );
+            Self::apply_m3_visuals(&result.palette, ctx);
         }
     }
 

@@ -214,6 +214,16 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                                 save_config(&cfg);
                             }
 
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut cfg.target_fps, 15..=240)
+                                        .text("FPS objetivo"),
+                                )
+                                .drag_stopped()
+                            {
+                                save_config(&cfg);
+                            }
+
                             ui.add_space(10.0);
                             ui.heading("Reproducción");
                             ui.separator();
