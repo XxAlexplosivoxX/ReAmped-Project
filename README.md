@@ -67,28 +67,21 @@ cargo run --release -p ReAmped
 
 ## Install
 
-### Quick install (pre-built binary)
+### Quick install (pre-built binary, no Rust toolchain needed)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/XxAlexplosivoxX/ReAmped-Project/main/install.sh | bash
 ```
 
-Downloads the latest release binary directly — no Rust toolchain needed.
-
 ### From source
 
 ```bash
-# Per-user install (default, no root needed)
-./install.sh
-
-# System-wide install (requires sudo)
-sudo ./install.sh
-
-# Skip build if already compiled
-./install.sh --no-build
+# Build and install from local source
+./install.sh --build
+sudo ./install.sh --build   # system-wide
 ```
 
-Installs the binary to `~/.local/bin/reamped` (or `/usr/local/bin/`), the icon and assets to `~/.local/share/ReAmped/`, and creates a desktop entry. If `fish_add_path` is available, it adds `~/.local/bin` to PATH automatically; otherwise, you may need to add it to your shell config manually.
+Downloads the latest release binary by default, or pass `--build` to compile from source. Installs to `~/.local/bin/reamped` (or `/usr/local/bin/`). If `fish_add_path` is available, it adds `~/.local/bin` to PATH automatically; otherwise you may need to add it manually.
 
 Run `reamped` after installation.
 
