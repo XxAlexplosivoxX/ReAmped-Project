@@ -81,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/XxAlexplosivoxX/ReAmped-Project/mai
 sudo ./install.sh --build   # system-wide
 ```
 
-Downloads the latest release binary by default, or pass `--build` to compile from source. Installs to `~/.local/bin/reamped` (or `/usr/local/bin/`). If `fish_add_path` is available, it adds `~/.local/bin` to PATH automatically; otherwise you may need to add it manually.
+Downloads the latest release binary by default, or pass `--build` to compile from source. Installs to `~/.local/bin/reamped` (or `/usr/local/bin/`). Automatically adds `~/.local/bin` to PATH via `fish_add_path` (Fish), `.zshrc` (Zsh) or `.bashrc` (Bash) as appropriate.
 
 Run `reamped` after installation.
 
