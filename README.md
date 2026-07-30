@@ -67,6 +67,16 @@ cargo run --release -p ReAmped
 
 ## Install
 
+### Quick install (pre-built binary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/XxAlexplosivoxX/ReAmped-Project/main/install.sh | bash
+```
+
+Downloads the latest release binary directly — no Rust toolchain needed.
+
+### From source
+
 ```bash
 # Per-user install (default, no root needed)
 ./install.sh

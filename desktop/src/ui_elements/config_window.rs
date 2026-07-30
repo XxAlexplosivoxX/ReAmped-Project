@@ -223,6 +223,9 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             {
                                 save_config(&cfg);
                             }
+                            if ui.checkbox(&mut cfg.vsync, "Vsync").changed() {
+                                save_config(&cfg);
+                            }
 
                             ui.add_space(10.0);
                             ui.heading("Reproducción");
@@ -259,22 +262,76 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             ui.heading("Atajos de teclado");
                             ui.separator();
 
-                            ui.label("Presiona una tecla y selecciona la acción:");
-
-                            let default_bindings = [
-                                ("Space", "Play/Pause"),
-                                ("ArrowRight", "Siguiente canción"),
-                                ("ArrowLeft", "Canción anterior"),
-                                ("M", "Modo aleatorio"),
-                                ("R", "Repetir"),
-                                ("S", "Detener"),
+                            let all_keys = [
+                                ("Space", "Espacio"),
+                                ("Enter", "Enter"),
+                                ("ArrowUp", "↑"),
+                                ("ArrowDown", "↓"),
+                                ("ArrowLeft", "←"),
+                                ("ArrowRight", "→"),
+                                ("N", "N"),
+                                ("P", "P"),
+                                ("M", "M"),
+                                ("R", "R"),
+                                ("S", "S"),
                             ];
 
-                            for (key, action) in &default_bindings {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{:<12} →", key));
-                                    ui.label(action.to_string());
+                            let all_commands: &[(&str, &str)] = &[
+                                ("PlayPause", "Play/Pause"),
+                                ("Play", "Reproducir"),
+                                ("Pause", "Pausa"),
+                                ("Next", "Siguiente"),
+                                ("Previous", "Anterior"),
+                                ("Stop", "Detener"),
+                                ("Shuffle", "Aleatorio"),
+                                ("Repeat", "Repetir"),
+                                ("RepeatOne", "Repetir una"),
+                            ];
+
+                            let mut kb_changed = false;
+
+                            for (key, key_label) in &all_keys {
+                                let current_key = key.to_string();
+                                let current_cmd = cfg.keybindings.bindings.get(&current_key).cloned();
+                                let current_text = current_cmd.as_deref().map_or("—".to_string(), |c| {
+                                    all_commands
+                                        .iter()
+                                        .find(|(k, _)| *k == c)
+                                        .map_or(c.to_string(), |(_, l)| l.to_string())
                                 });
+
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{:<12}", *key_label));
+                                    egui::ComboBox::from_id_salt(format!("kb_{}", current_key))
+                                        .selected_text(&current_text)
+                                        .width(140.0)
+                                        .show_ui(ui, |ui| {
+                                            let is_none = current_cmd.is_none();
+                                            if ui
+                                                .selectable_label(is_none, "— Sin asignar —")
+                                                .clicked() && !is_none
+                                            {
+                                                cfg.keybindings.bindings.remove(&current_key);
+                                                kb_changed = true;
+                                            }
+                                            for (cmd, cmd_label) in all_commands {
+                                                let is_selected = current_cmd.as_deref() == Some(cmd);
+                                                if ui
+                                                    .selectable_label(is_selected, *cmd_label)
+                                                    .clicked() && !is_selected
+                                                {
+                                                    cfg.keybindings
+                                                        .bindings
+                                                        .insert(current_key.clone(), cmd.to_string());
+                                                    kb_changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                            }
+
+                            if kb_changed {
+                                save_config(&cfg);
                             }
 
                             ui.add_space(10.0);

@@ -68,10 +68,14 @@ pub struct AppConfig {
     /// Target frames per second for the UI (when focused).
     #[serde(default = "default_fps")]
     pub target_fps: u32,
+    /// Enable vsync (may cause freezes on Hyprland when switching workspaces).
+    #[serde(default = "default_true")]
+    pub vsync: bool,
 }
 
 fn default_eq_gain() -> f32 { 1.0 }
 fn default_fps() -> u32 { 60 }
+fn default_true() -> bool { true }
 
 /// Source of the colour theme palette.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -225,6 +229,7 @@ impl Default for AppConfig {
             high_val: 1.0,
             width_val: 1.0,
             target_fps: default_fps(),
+            vsync: default_true(),
         }
     }
 }

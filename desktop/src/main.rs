@@ -31,6 +31,8 @@ use crate::{
 /// If the persisted configuration has `fullscreen = true`, the viewport is
 /// switched to fullscreen before the first frame.
 fn main() -> eframe::Result<()> {
+    let config = load_config();
+
     let startup_paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
@@ -39,7 +41,7 @@ fn main() -> eframe::Result<()> {
     let startup_tracks = scan_music_inputs(&startup_paths);
 
     let options = eframe::NativeOptions {
-        vsync: true,
+        vsync: config.vsync,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([550.0, 310.0])
             .with_resizable(false)
@@ -47,15 +49,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let fullscreen = config.fullscreen;
+
     eframe::run_native(
         "ReAmped",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             setup_fonts(&cc.egui_ctx);
-            let app = load_config();
-            if app.fullscreen {
+            if fullscreen {
                 cc.egui_ctx
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(app.fullscreen));
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
             }
             Ok(Box::new(PlayerApp::new(startup_tracks.clone())))
         }),

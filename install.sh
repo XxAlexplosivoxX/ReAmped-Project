@@ -3,11 +3,7 @@ set -euo pipefail
 
 APP_NAME="ReAmped"
 BINARY_NAME="reamped"
-VERSION="1.2.0"
-
-SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="$SRC_DIR/desktop/target/release"
-BINARY_PATH="$BUILD_DIR/$APP_NAME"
+REPO="XxAlexplosivoxX/ReAmped-Project"
 
 # ── Detect install mode ──────────────────────────────────────────────────
 if [[ $EUID -eq 0 ]]; then
@@ -23,15 +19,12 @@ else
 fi
 
 # ── Parse flags ──────────────────────────────────────────────────────────
-REBUILD=true
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-build) REBUILD=false; shift ;;
         --system)   INSTALL_SCOPE="system"; shift ;;
         --user)     INSTALL_SCOPE="user"; shift ;;
         --help|-h)
-            echo "Usage: $0 [--no-build] [--system|--user]"
-            echo "  --no-build   Skip cargo build (use existing binary)"
+            echo "Usage: $0 [--system|--user]"
             echo "  --system     Install system-wide (/usr/local)"
             echo "  --user       Install per-user (~/.local)"
             exit 0 ;;
@@ -50,75 +43,27 @@ else
     DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 fi
 
-echo "=== $APP_NAME v$VERSION Installer ==="
+echo "=== $APP_NAME Installer (latest release) ==="
 echo "Scope:     $INSTALL_SCOPE"
 echo "Binary:    $BIN_DIR/$BINARY_NAME"
-echo "Data:      $DATA_DIR"
-echo "Icon:      $DATA_DIR/reamped.png"
-echo "Desktop:   $DESKTOP_DIR/reamped.desktop"
 echo ""
 
-# ── Build ────────────────────────────────────────────────────────────────
-if $REBUILD; then
-    echo ">> Building $APP_NAME (cargo build --release)..."
-    cd "$SRC_DIR/desktop"
-    cargo build --release
-    cd "$SRC_DIR"
-else
-    if [[ ! -f "$BINARY_PATH" ]]; then
-        echo "ERROR: Binary not found at $BINARY_PATH. Use without --no-build or build first."
-        exit 1
-    fi
+# ── Download binary from latest GitHub release ──────────────────────────
+RELEASE_URL="https://api.github.com/repos/$REPO/releases/latest"
+echo ">> Fetching latest release info..."
+TAG=$(curl -sL "$RELEASE_URL" | grep '"tag_name":' | sed 's/.*"tag_name": "\(.*\)",/\1/')
+if [[ -z "$TAG" ]]; then
+    echo "ERROR: Could not determine latest release tag"
+    exit 1
 fi
+echo "   Latest release: $TAG"
 
-# ── Install binary ───────────────────────────────────────────────────────
-echo ">> Installing binary..."
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$APP_NAME"
+echo ">> Downloading $APP_NAME binary..."
 mkdir -p "$BIN_DIR"
-install -m 755 "$BINARY_PATH" "$BIN_DIR/$BINARY_NAME"
+curl -#L "$DOWNLOAD_URL" -o "$BIN_DIR/$BINARY_NAME"
+chmod +x "$BIN_DIR/$BINARY_NAME"
 echo "   Installed: $BIN_DIR/$BINARY_NAME"
-
-# ── Install data assets ──────────────────────────────────────────────────
-echo ">> Installing data assets..."
-mkdir -p "$DATA_DIR"
-if [[ -d "$SRC_DIR/assets" ]]; then
-    cp -r "$SRC_DIR/assets"/* "$DATA_DIR/"
-    echo "   Copied assets to $DATA_DIR"
-fi
-
-# ── Install icon ─────────────────────────────────────────────────────────
-echo ">> Installing icon..."
-ICO_SRC="$SRC_DIR/assets/ReAmped.ico"
-if [[ -f "$ICO_SRC" ]]; then
-    ICON_DST="$DATA_DIR/reamped.png"
-    if command -v magick &>/dev/null; then
-        magick "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
-    elif command -v convert &>/dev/null; then
-        convert "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
-    else
-        # No ImageMagick: just symlink from /usr/share/icons if possible
-        echo "   WARNING: ImageMagick not found, skipping icon install"
-        ICON_DST=""
-    fi
-    if [[ -f "$ICON_DST" ]]; then
-        echo "   Installed icon: $ICON_DST"
-    fi
-else
-    echo "   WARNING: $ICO_SRC not found"
-fi
-
-# ── Install desktop entry ────────────────────────────────────────────────
-echo ">> Installing desktop entry..."
-mkdir -p "$DESKTOP_DIR"
-DESKTOP_SRC="$SRC_DIR/assets/ReAmped.desktop"
-if [[ -f "$DESKTOP_SRC" ]]; then
-    # Use absolute icon path if we installed one
-    if [[ -n "${ICON_DST:-}" ]] && [[ -f "$ICON_DST" ]]; then
-        sed "s|^Icon=.*|Icon=$ICON_DST|" "$DESKTOP_SRC" > "$DESKTOP_DIR/reamped.desktop"
-    else
-        install -m 644 "$DESKTOP_SRC" "$DESKTOP_DIR/reamped.desktop"
-    fi
-    echo "   Installed: $DESKTOP_DIR/reamped.desktop"
-fi
 
 # ── Add ~/.local/bin to PATH if not present ──────────────────────────────
 if [[ "$INSTALL_SCOPE" == "user" ]]; then
@@ -141,10 +86,9 @@ if [[ "$INSTALL_SCOPE" == "user" ]]; then
         fi
 
         if [[ -n "$RC_FILE" ]]; then
-            # Only add if not already present
             if ! grep -sqF "$BIN_DIR" "$RC_FILE" 2>/dev/null; then
                 echo "" >> "$RC_FILE"
-                echo "# Added by ReAmped installer" >> "$RC_FILE"
+                echo "# Added by $APP_NAME installer" >> "$RC_FILE"
                 echo "$LINE" >> "$RC_FILE"
                 echo "   Added '$BIN_DIR' to PATH in $RC_FILE"
             fi
