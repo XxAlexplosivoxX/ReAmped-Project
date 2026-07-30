@@ -109,21 +109,10 @@ if [[ "$MODE" == "build" ]]; then
         ICON_DST=""
     fi
 else
-    ICO_TMP=$(mktemp)
-    if curl -sL -o "$ICO_TMP" "$RAW_BASE/assets/ReAmped.ico" 2>/dev/null; then
-        if command -v magick &>/dev/null; then
-            magick "$ICO_TMP[0]" "$ICON_DST" 2>/dev/null && echo "   Converted icon from .ico"
-        elif command -v convert &>/dev/null; then
-            convert "$ICO_TMP[0]" "$ICON_DST" 2>/dev/null && echo "   Converted icon from .ico"
-        else
-            echo "   WARNING: ImageMagick not found, skipping icon install"
-            ICON_DST=""
-        fi
-    else
-        echo "   WARNING: Could not download icon, skipping"
+    if ! curl -sL -o "$ICON_DST" "$RAW_BASE/assets/reamped.png" 2>/dev/null; then
+        echo "   WARNING: Could not download icon"
         ICON_DST=""
     fi
-    rm -f "$ICO_TMP"
 fi
 
 if [[ -f "$ICON_DST" ]]; then
