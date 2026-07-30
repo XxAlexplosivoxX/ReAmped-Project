@@ -4,6 +4,7 @@ set -euo pipefail
 APP_NAME="ReAmped"
 BINARY_NAME="reamped"
 REPO="XxAlexplosivoxX/ReAmped-Project"
+RAW_BASE="https://raw.githubusercontent.com/$REPO/main"
 
 # ── Detect install scope ─────────────────────────────────────────────────
 if [[ $EUID -eq 0 ]]; then
@@ -69,57 +70,15 @@ if [[ "$MODE" == "build" ]]; then
     mkdir -p "$BIN_DIR"
     install -m 755 "$BINARY_PATH" "$BIN_DIR/$BINARY_NAME"
     echo "   Installed: $BIN_DIR/$BINARY_NAME"
-
-    # ── Install data assets ──────────────────────────────────────────────
-    echo ">> Installing data assets..."
-    mkdir -p "$DATA_DIR"
-    if [[ -d "$SRC_DIR/assets" ]]; then
-        cp -r "$SRC_DIR/assets"/* "$DATA_DIR/"
-        echo "   Copied assets to $DATA_DIR"
-    fi
-
-    # ── Install icon ─────────────────────────────────────────────────────
-    echo ">> Installing icon..."
-    ICO_SRC="$SRC_DIR/assets/ReAmped.ico"
-    if [[ -f "$ICO_SRC" ]]; then
-        ICON_DST="$DATA_DIR/reamped.png"
-        if command -v magick &>/dev/null; then
-            magick "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
-        elif command -v convert &>/dev/null; then
-            convert "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
-        else
-            echo "   WARNING: ImageMagick not found, skipping icon install"
-            ICON_DST=""
-        fi
-        if [[ -f "$ICON_DST" ]]; then
-            echo "   Installed icon: $ICON_DST"
-        fi
-    else
-        echo "   WARNING: $ICO_SRC not found"
-    fi
-
-    # ── Install desktop entry ────────────────────────────────────────────
-    echo ">> Installing desktop entry..."
-    mkdir -p "$DESKTOP_DIR"
-    DESKTOP_SRC="$SRC_DIR/assets/ReAmped.desktop"
-    if [[ -f "$DESKTOP_SRC" ]]; then
-        if [[ -n "${ICON_DST:-}" ]] && [[ -f "$ICON_DST" ]]; then
-            sed "s|^Icon=.*|Icon=$ICON_DST|" "$DESKTOP_SRC" > "$DESKTOP_DIR/reamped.desktop"
-        else
-            install -m 644 "$DESKTOP_SRC" "$DESKTOP_DIR/reamped.desktop"
-        fi
-        echo "   Installed: $DESKTOP_DIR/reamped.desktop"
-    fi
 else
     # ── Download from latest GitHub release ──────────────────────────────
     RELEASE_URL="https://api.github.com/repos/$REPO/releases/latest"
-    echo ">> Fetching latest release info..."
     TAG=$(curl -sL "$RELEASE_URL" | grep '"tag_name":' | sed 's/.*"tag_name": "\(.*\)",/\1/')
     if [[ -z "$TAG" ]]; then
         echo "ERROR: Could not determine latest release tag"
         exit 1
     fi
-    echo "   Latest release: $TAG"
+    echo ">> Latest release: $TAG"
 
     DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$APP_NAME"
     echo ">> Downloading $APP_NAME binary..."
@@ -128,6 +87,78 @@ else
     chmod +x "$BIN_DIR/$BINARY_NAME"
     echo "   Installed: $BIN_DIR/$BINARY_NAME"
 fi
+
+# ── Install icon ─────────────────────────────────────────────────────────
+echo ">> Installing icon..."
+mkdir -p "$DATA_DIR"
+ICON_DST="$DATA_DIR/reamped.png"
+
+if [[ "$MODE" == "build" ]]; then
+    ICO_SRC="$SRC_DIR/assets/ReAmped.ico"
+    if [[ -f "$ICO_SRC" ]]; then
+        if command -v magick &>/dev/null; then
+            magick "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
+        elif command -v convert &>/dev/null; then
+            convert "$ICO_SRC[0]" "$ICON_DST" 2>/dev/null
+        else
+            echo "   WARNING: ImageMagick not found, skipping icon install"
+            ICON_DST=""
+        fi
+    else
+        echo "   WARNING: $ICO_SRC not found"
+        ICON_DST=""
+    fi
+else
+    if curl -sL -o "$ICON_DST" "$RAW_BASE/assets/reamped.png" 2>/dev/null; then
+        echo "   Downloaded icon from repo"
+    else
+        # Fallback: download .ico and try to convert
+        ICO_TMP=$(mktemp)
+        if curl -sL -o "$ICO_TMP" "$RAW_BASE/assets/ReAmped.ico" 2>/dev/null; then
+            if command -v magick &>/dev/null; then
+                magick "$ICO_TMP[0]" "$ICON_DST" 2>/dev/null && echo "   Converted icon from .ico"
+            elif command -v convert &>/dev/null; then
+                convert "$ICO_TMP[0]" "$ICON_DST" 2>/dev/null && echo "   Converted icon from .ico"
+            else
+                echo "   WARNING: ImageMagick not found, skipping icon install"
+                ICON_DST=""
+            fi
+        else
+            echo "   WARNING: Could not download icon, skipping"
+            ICON_DST=""
+        fi
+        rm -f "$ICO_TMP"
+    fi
+fi
+
+if [[ -f "$ICON_DST" ]]; then
+    echo "   Installed icon: $ICON_DST"
+fi
+
+# ── Install desktop entry ────────────────────────────────────────────────
+echo ">> Installing desktop entry..."
+mkdir -p "$DESKTOP_DIR"
+
+DESKTOP_TMP=$(mktemp)
+if [[ "$MODE" == "build" ]] && [[ -f "$SRC_DIR/assets/ReAmped.desktop" ]]; then
+    cp "$SRC_DIR/assets/ReAmped.desktop" "$DESKTOP_TMP"
+elif curl -sL -o "$DESKTOP_TMP" "$RAW_BASE/assets/ReAmped.desktop" 2>/dev/null; then
+    :
+else
+    echo "   WARNING: Could not download desktop entry"
+    rm -f "$DESKTOP_TMP"
+    DESKTOP_TMP=""
+fi
+
+if [[ -n "${DESKTOP_TMP:-}" ]] && [[ -s "$DESKTOP_TMP" ]]; then
+    if [[ -n "${ICON_DST:-}" ]] && [[ -f "$ICON_DST" ]]; then
+        sed "s|^Icon=.*|Icon=$ICON_DST|" "$DESKTOP_TMP" > "$DESKTOP_DIR/reamped.desktop"
+    else
+        install -m 644 "$DESKTOP_TMP" "$DESKTOP_DIR/reamped.desktop"
+    fi
+    echo "   Installed: $DESKTOP_DIR/reamped.desktop"
+fi
+rm -f "${DESKTOP_TMP:-}"
 
 # ── Add ~/.local/bin to PATH if not present ──────────────────────────────
 if [[ "$INSTALL_SCOPE" == "user" ]]; then
