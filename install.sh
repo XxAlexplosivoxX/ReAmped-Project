@@ -109,8 +109,8 @@ if [[ "$MODE" == "build" ]]; then
         ICON_DST=""
     fi
 else
-    if ! curl -sL -o "$ICON_DST" "$RAW_BASE/assets/reamped.png" 2>/dev/null; then
-        echo "   WARNING: Could not download icon"
+    if ! curl -fL -o "$ICON_DST" "$RAW_BASE/assets/reamped.png"; then
+        echo "   ERROR: Could not download icon from $RAW_BASE/assets/reamped.png"
         ICON_DST=""
     fi
 fi
