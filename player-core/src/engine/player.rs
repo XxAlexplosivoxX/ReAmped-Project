@@ -505,12 +505,14 @@ fn audio_loop(
         // ==================================================================
         // 6. Position + loudness update
         //
-        // While playing, pull the instantaneous dB loudness from the backend
-        // into lock-free atomics (`db_l` / `db_r`) and update the shared
-        // position. When paused/stopped, write silence-level dB (-100) and
-        // sleep 16 ms to avoid busy-waiting.
+        // While audio is being output, pull the instantaneous dB loudness from
+        // the backend into lock-free atomics (`db_l` / `db_r`) and update the
+        // shared position. During a pause fade-out the backend is still
+        // audible, so the position keeps advancing; only once the output is
+        // truly silent do we write silence-level dB (-100) and sleep to avoid
+        // busy-waiting.
         // ==================================================================
-        if playing {
+        if backend.is_audible() {
             let (l, r) = backend.get_db_loudness();
             db_l.store(l, Ordering::Relaxed);
             db_r.store(r, Ordering::Relaxed);
@@ -519,6 +521,9 @@ fn audio_loop(
         } else {
             db_l.store(-100.0, Ordering::Relaxed);
             db_r.store(-100.0, Ordering::Relaxed);
+            let mut s = state.lock().unwrap();
+            s.position = backend.position();
+            drop(s);
             std::thread::sleep(Duration::from_millis(16));
         }
 

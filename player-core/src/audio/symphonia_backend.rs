@@ -83,6 +83,7 @@ pub struct SymphoniaBackend {
     playing: Arc<AtomicBool>,
     start: Option<Instant>,
     paused_at: f32,
+    pause_fade_started: Option<Instant>,
     volume: Arc<AtomicU32>,
     stream: Option<Stream>,
     alive: Arc<AtomicBool>,
@@ -138,6 +139,7 @@ impl SymphoniaBackend {
             playing: Arc::new(AtomicBool::new(false)),
             start: None,
             paused_at: 0.0,
+            pause_fade_started: None,
             volume: Arc::new(AtomicU32::new((load_config().volume * 100.0) as u32)),
             stream: None,
             alive: Arc::new(AtomicBool::new(false)),
@@ -630,9 +632,17 @@ impl AudioBackend for SymphoniaBackend {
 
     /// Start or resume playback with a short fade-in (state = 1).
     fn play(&mut self) {
-        if self.start.is_none() {
-            self.start = Some(Instant::now());
+        if let Some(start) = self.start {
+            // Still had a live window (e.g. re-play while playing): fold it.
+            self.paused_at += start.elapsed().as_secs_f32();
+        } else if let Some(fade_start) = self.pause_fade_started {
+            // Resume after a pause: only the fade-out portion actually
+            // sounded, so don't fold the whole paused time in.
+            let fade_dur = self.fade_duration_ms.load(Ordering::Relaxed) as f32 / 1000.0;
+            self.paused_at += fade_start.elapsed().as_secs_f32().min(fade_dur);
         }
+        self.pause_fade_started = None;
+        self.start = Some(Instant::now());
         self.playing.store(true, Ordering::SeqCst);
         self.paused_during_fade.store(false, Ordering::SeqCst);
         self.fade_state.store(1, Ordering::SeqCst);
@@ -649,9 +659,17 @@ impl AudioBackend for SymphoniaBackend {
     /// `playing` becomes false after the fade), so [`play()`] can resume the
     /// crossfade from the frozen [`PausedFading`](crate::audio::crossfade::CrossfadePhase::PausedFading) gains.
     fn pause(&mut self) {
+        // Fold the time that sounded so far into the base, then start a new
+        // window for the fade-out. The fade-out is still audible, so
+        // `position()` keeps advancing from `pause_fade_started` until the
+        // audio goes silent and then holds. `play()` folds that advance on
+        // resume, keeping the displayed position in sync with what was heard.
         if let Some(start) = self.start {
             self.paused_at += start.elapsed().as_secs_f32();
             self.start = None;
+        }
+        if !self.paused_during_fade.load(Ordering::SeqCst) {
+            self.pause_fade_started = Some(Instant::now());
         }
         self.samples.lock().unwrap().clear();
         // Stop crossfade mixing — the callback will only process the primary
@@ -675,6 +693,8 @@ impl AudioBackend for SymphoniaBackend {
         self.alive.store(false, Ordering::SeqCst);
         self.start = None;
         self.paused_at = 0.0;
+        self.pause_fade_started = None;
+        self.paused_during_fade.store(false, Ordering::SeqCst);
         self.finished.store(false, Ordering::SeqCst);
         self.primary_consumer.lock().unwrap().take();
         if let Some(h) = self.decode_handle.take() {
@@ -698,13 +718,30 @@ impl AudioBackend for SymphoniaBackend {
     }
 
     /// Current playback position in seconds (trim-relative).
+    ///
+    /// While a pause fade-out is still audible the position keeps advancing
+    /// from the pause press, then holds once the audio is silent.
     fn position(&self) -> f32 {
         let ts = self.trim_start.load(Ordering::SeqCst);
         let abs = match self.start {
             Some(t) => self.paused_at + t.elapsed().as_secs_f32(),
-            None => self.paused_at,
+            None => match self.pause_fade_started {
+                // Paused: the fade-out was (or still is) audible, so advance
+                // from the pause press up to the fade duration, then hold.
+                Some(fade_start) => {
+                    let fade_dur = self.fade_duration_ms.load(Ordering::Relaxed) as f32 / 1000.0;
+                    self.paused_at + fade_start.elapsed().as_secs_f32().min(fade_dur)
+                }
+                None => self.paused_at,
+            },
         };
         (abs - ts).max(0.0)
+    }
+
+    /// Whether audio is currently being output (true during a pause fade-out,
+    /// false once the fade completes and the output is silent).
+    fn is_audible(&self) -> bool {
+        self.playing.load(Ordering::SeqCst)
     }
 
     /// The output sample rate determined by the CPAL device.
@@ -926,6 +963,7 @@ impl AudioBackend for SymphoniaBackend {
         // accounting for the seconds already consumed during crossfade
         let ts = self.trim_start.load(Ordering::SeqCst);
         self.paused_at = ts + xf_elapsed;
+        self.pause_fade_started = None;
         self.start = Some(Instant::now());
 
         path

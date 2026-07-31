@@ -57,27 +57,21 @@ fn draw_role_editor(
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.vertical(|ui| {
-                let mut r = color[0] as f32 / 255.0;
-                let mut g = color[1] as f32 / 255.0;
-                let mut b = color[2] as f32 / 255.0;
                 ui.add(
-                    egui::Slider::new(&mut r, 0.0..=1.0)
+                    egui::Slider::new(&mut color[0], 0..=255)
                         .text("R")
                         .fixed_decimals(0),
                 );
                 ui.add(
-                    egui::Slider::new(&mut g, 0.0..=1.0)
+                    egui::Slider::new(&mut color[1], 0..=255)
                         .text("G")
                         .fixed_decimals(0),
                 );
                 ui.add(
-                    egui::Slider::new(&mut b, 0.0..=1.0)
+                    egui::Slider::new(&mut color[2], 0..=255)
                         .text("B")
                         .fixed_decimals(0),
                 );
-                color[0] = (r * 255.0) as u8;
-                color[1] = (g * 255.0) as u8;
-                color[2] = (b * 255.0) as u8;
             });
         });
     }

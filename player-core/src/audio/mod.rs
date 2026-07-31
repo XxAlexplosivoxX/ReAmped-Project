@@ -36,6 +36,9 @@ pub trait AudioBackend {
     // ---- State queries ----
     /// Current playback position in seconds (adjusted for silence trim).
     fn position(&self) -> f32;
+    /// Whether audio is currently being output. Stays `true` during a pause
+    /// fade-out and only turns `false` once the output has gone silent.
+    fn is_audible(&self) -> bool;
     /// Output sample rate of the CPAL stream in Hz.
     fn sample_rate(&self) -> f32;
     /// Shared buffer that the output callback fills with interleaved stereo samples

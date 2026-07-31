@@ -238,68 +238,121 @@ pub fn get_system_wallpaper_buffer() -> Option<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 fn get_wallpaper_linux() -> Option<Vec<u8>> {
-    // Try GNOME
-    if let Ok(path) = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.background", "picture-uri"])
-        .output()
-    {
-        if path.status.success() {
-            let mut s = String::from_utf8_lossy(&path.stdout).trim().to_string();
-            if let Some(stripped) = s.strip_prefix("'") {
-                s = stripped.to_string();
-            }
-            if let Some(stripped) = s.strip_suffix("'") {
-                s = stripped.to_string();
-            }
-            if s.starts_with("file://") {
-                let path = s.trim_start_matches("file://");
-                return std::fs::read(path).ok();
-            }
-            return std::fs::read(&s).ok();
+    // 1. The actual on-screen wallpaper daemons, read from `/proc/<pid>/cmdline`:
+    //    swaybg / swww / hyprpaper / mpvpaper / hsetroot / feh.
+    //    This is what compositors actually render, so it always reflects what
+    //    the user sees regardless of the desktop environment.
+    for (bin, flags) in [
+        ("swaybg", &["-i", "--image"][..]),
+        ("mpvpaper", &[][..]),
+        ("hsetroot", &[][..]),
+        ("feh", &[][..]),
+    ] {
+        if let Some(data) = wallpaper_from_process(bin, flags) {
+            return Some(data);
         }
     }
 
-    // Try Hyprland via swww query (most popular animated wallpaper daemon)
-    // Output format: "Monitor eDP-1 (2560x1600): /path/to/wallpaper.jpg"
+    // 2. Try Hyprland via swww query (most popular animated wallpaper daemon)
+    //    Output format: "Monitor eDP-1 (2560x1600): /path/to/wallpaper.jpg"
     if let Ok(out) = std::process::Command::new("swww")
         .args(["query"])
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            for line in s.lines() {
-                // Find the path after "): "
-                if let Some(idx) = line.find("): ") {
-                    let path = line[idx + 3..].trim();
-                    if !path.is_empty() {
-                        if let Ok(data) = std::fs::read(path) {
-                            return Some(data);
-                        }
-                    }
-                }
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            // Find the path after "): "
+            if let Some(idx) = line.find("): ")
+                && let Some(data) = std::fs::read(line[idx + 3..].trim()).ok()
+                && is_valid_image(&data)
+            {
+                return Some(data);
             }
         }
     }
 
-    // Try Hyprland via hyprctl hyprpaper (for hyprpaper users)
+    // 3. Try Hyprland via hyprctl hyprpaper (for hyprpaper users)
     if let Ok(out) = std::process::Command::new("hyprctl")
         .args(["hyprpaper", "listloaded"])
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            for line in s.lines() {
-                let path = line.trim();
-                if !path.is_empty() {
-                    if let Ok(data) = std::fs::read(path) {
-                        return Some(data);
-                    }
-                }
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            let path = line.trim();
+            if !path.is_empty()
+                && let Ok(data) = std::fs::read(path)
+                && is_valid_image(&data)
+            {
+                return Some(data);
             }
         }
     }
 
-    // Try KDE via DBus (Plasma 5/6)
+    if let Some(cfg) = config_dir() {
+        // 4. omarchy: `current/background` is a symlink to the active theme's
+        //    wallpaper (e.g. aether's generated background).
+        let omarchy = cfg.join("omarchy").join("current").join("background");
+        if let Some(data) = read_wallpaper_file(&omarchy) {
+            return Some(data);
+        }
+
+        // 5. aether: the theme generator drops the current wallpaper in
+        //    `theme/backgrounds`; pick the most recently written one.
+        let aether_dir = cfg.join("aether").join("theme").join("backgrounds");
+        if let Some(data) = newest_image_in(&aether_dir) {
+            return Some(data);
+        }
+
+        // 6. waypaper (GUI that manages swww / swaybg / hyprpaper):
+        //    `~/.config/waypaper/config.ini` → `current_wallpaper=...`
+        let waypaper = cfg.join("waypaper").join("config.ini");
+        if let Some(data) = image_from_config_file(&waypaper, "current_wallpaper") {
+            return Some(data);
+        }
+
+        // 7. pcmanfm (LXDE / LXQt): `~/.config/pcmanfm/default/pcmanfm.conf`
+        //    → `wallpaper=...`
+        let pcmanfm = cfg.join("pcmanfm").join("default").join("pcmanfm.conf");
+        if let Some(data) = image_from_config_file(&pcmanfm, "wallpaper") {
+            return Some(data);
+        }
+
+        // 8. nitrogen (X11): `~/.config/nitrogen/bg-saved.cfg` → `file=...`
+        let nitrogen = cfg.join("nitrogen").join("bg-saved.cfg");
+        if let Some(data) = image_from_config_file(&nitrogen, "file") {
+            return Some(data);
+        }
+
+        // 9. KDE Plasma (no qdbus): `~/.config/plasma-org.kde.plasma.desktop-appletsrc`
+        //    → `Image=file:///path` (one entry per desktop).
+        let kde = cfg.join("plasma-org.kde.plasma.desktop-appletsrc");
+        if let Some(data) = image_from_config_file(&kde, "Image") {
+            return Some(data);
+        }
+    }
+
+    // 10. feh (X11): `~/.fehbg` contains `exec feh --bg-scale '/path/to/img'`
+    if let Some(home) = std::env::var_os("HOME") {
+        let fehbg = std::path::PathBuf::from(home).join(".fehbg");
+        if let Some(data) = wallpaper_from_fehbg(&fehbg) {
+            return Some(data);
+        }
+    }
+
+    // 11. gsettings (GNOME / Cinnamon / MATE)
+    for (schema, key) in [
+        ("org.gnome.desktop.background", "picture-uri"),
+        ("org.cinnamon.desktop.background", "picture-uri"),
+        ("org.mate.background", "picture-filename"),
+    ] {
+        if let Some(data) = wallpaper_from_gsettings(schema, key) {
+            return Some(data);
+        }
+    }
+
+    // 12. Try KDE via DBus (Plasma 5/6)
     if let Ok(out) = std::process::Command::new("qdbus")
         .args([
             "org.kde.plasmashell",
@@ -308,20 +361,267 @@ fn get_wallpaper_linux() -> Option<Vec<u8>> {
             "var a = desktops(); for (var i=0;i<a.length;i++) { print(a[i].wallpaper); }",
         ])
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            let path = s.trim();
-            if !path.is_empty() {
-                if let Some(stripped) = path.strip_prefix("file://") {
-                    return std::fs::read(stripped).ok();
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            let path = line.trim();
+            if path.is_empty() {
+                continue;
+            }
+            if let Some(stripped) = path.strip_prefix("file://") {
+                if let Ok(data) = std::fs::read(stripped) {
+                    return Some(data);
                 }
-                return std::fs::read(path).ok();
+            } else if let Ok(data) = std::fs::read(path) {
+                return Some(data);
             }
         }
     }
 
+    // 13. Xfce (xfconf): iterate the `last-image` backdrop properties.
+    wallpaper_from_xfce()
+}
+
+/// Resolve the XDG config directory (`$XDG_CONFIG_HOME` or `~/.config`).
+#[cfg(target_os = "linux")]
+fn config_dir() -> Option<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let p = std::path::PathBuf::from(xdg);
+        if p.is_absolute() {
+            return Some(p);
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join(".config"))
+}
+
+/// Scan `/proc/<pid>/cmdline` for a running wallpaper daemon and return the
+/// image it was launched with.
+///
+/// When `flags` is non-empty, the image is the argument following one of those
+/// flags (`swaybg -i <path>`, `swaybg --image <path>`, …).  When `flags` is
+/// empty, the image is the last argument (`hsetroot -fill <path>`,
+/// `feh --bg-scale <path>`, `mpvpaper <output> <video>`, …).
+#[cfg(target_os = "linux")]
+fn wallpaper_from_process(binary: &str, flags: &[&str]) -> Option<Vec<u8>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let args: Vec<&str> = cmdline
+            .split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| std::str::from_utf8(s).ok())
+            .collect();
+        if !args.first().is_some_and(|a| a.contains(binary)) {
+            continue;
+        }
+        if flags.is_empty() {
+            if let Some(arg) = args.last()
+                && let Some(data) = read_wallpaper_file(std::path::Path::new(arg))
+            {
+                return Some(data);
+            }
+            continue;
+        }
+        let mut prev = "";
+        for arg in args {
+            if flags.contains(&prev)
+                && let Some(data) = read_wallpaper_file(std::path::Path::new(arg))
+            {
+                return Some(data);
+            }
+            prev = arg;
+        }
+    }
     None
+}
+
+/// Read a wallpaper path from a simple `key=value` config file
+/// (waypaper, pcmanfm, nitrogen, KDE appletsrc, …).
+#[cfg(target_os = "linux")]
+fn image_from_config_file(path: &Path, key: &str) -> Option<Vec<u8>> {
+    let data = std::fs::read_to_string(path).ok()?;
+    for line in data.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() != key {
+            continue;
+        }
+        let v = v.trim().trim_matches(['"', '\'', ' ']);
+        if let Some(img) = read_image_path(v) {
+            return Some(img);
+        }
+    }
+    None
+}
+
+/// Read the first quoted path from `~/.fehbg`
+/// (`exec feh --bg-scale '/path/to/img'`).
+#[cfg(target_os = "linux")]
+fn wallpaper_from_fehbg(path: &Path) -> Option<Vec<u8>> {
+    let data = std::fs::read_to_string(path).ok()?;
+    let quoted = data.split('\'').nth(1).or_else(|| data.split('"').nth(1))?;
+    if let Ok(img) = std::fs::read(quoted.trim())
+        && is_valid_image(&img)
+    {
+        return Some(img);
+    }
+    None
+}
+
+/// Query a desktop background through `gsettings`.
+#[cfg(target_os = "linux")]
+fn wallpaper_from_gsettings(schema: &str, key: &str) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("gsettings")
+        .args(["get", schema, key])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Some(stripped) = s.strip_prefix("'") {
+        s = stripped.to_string();
+    }
+    if let Some(stripped) = s.strip_suffix("'") {
+        s = stripped.to_string();
+    }
+    read_image_path(&s)
+}
+
+/// Query the Xfce backdrop wallpaper via `xfconf-query`.
+#[cfg(target_os = "linux")]
+fn wallpaper_from_xfce() -> Option<Vec<u8>> {
+    let out = std::process::Command::new("xfconf-query")
+        .args(["-c", "xfce4-desktop", "-l"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    for prop in s.lines().map(str::trim) {
+        if !prop.contains("last-image") {
+            continue;
+        }
+        if let Ok(v) = std::process::Command::new("xfconf-query")
+            .args(["-c", "xfce4-desktop", "-p", prop])
+            .output()
+            && v.status.success()
+        {
+            let path = String::from_utf8_lossy(&v.stdout)
+                .trim()
+                .trim_matches(['\'', '"'])
+                .to_string();
+            if let Some(img) = read_image_path(&path) {
+                return Some(img);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a wallpaper path/value (possibly `file://…` or `~/…`) and return
+/// its bytes if it decodes as an image (decoding a single frame for video).
+#[cfg(target_os = "linux")]
+fn read_image_path(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let expanded = if let Some(rest) = value.strip_prefix("file://") {
+        std::path::PathBuf::from(rest)
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        std::path::PathBuf::from(value)
+    };
+    read_wallpaper_file(&expanded)
+}
+
+/// Load a wallpaper file, returning decodable image bytes.
+///
+/// Regular images are read as-is; animated (video) wallpapers — e.g. the ones
+/// mpvpaper renders — have a single frame extracted with `ffmpeg` so the theme
+/// extraction still works.  Returns `None` when the file is neither an image
+/// nor a video, or when `ffmpeg` is unavailable.
+#[cfg(target_os = "linux")]
+fn read_wallpaper_file(path: &Path) -> Option<Vec<u8>> {
+    let data = std::fs::read(path).ok()?;
+    if is_valid_image(&data) {
+        return Some(data);
+    }
+    if is_video_path(path) {
+        return frame_from_video(path);
+    }
+    None
+}
+
+/// Common container extensions used by animated (video) wallpapers.
+#[cfg(target_os = "linux")]
+fn is_video_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        "mp4" | "mkv" | "webm" | "mov" | "m4v" | "avi" | "mpeg" | "mpg" | "ts"
+    )
+}
+
+/// Extract a single frame from an animated wallpaper with `ffmpeg`,
+/// returning it as PNG bytes in memory.
+#[cfg(target_os = "linux")]
+fn frame_from_video(path: &Path) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-v", "error",
+            "-ss", "1", // skip a second in case the intro frame is blank
+            "-i",
+            path.to_str()?,
+            "-frames:v", "1",
+            "-f", "image2pipe",
+            "-vcodec", "png",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        is_valid_image(&out.stdout).then_some(out.stdout)
+    } else {
+        None
+    }
+}
+
+/// Return the newest wallpaper in `dir` (used for aether's
+/// `theme/backgrounds` which only ever contains the active wallpaper).
+/// Animated (video) files are decoded to a single frame.
+#[cfg(target_os = "linux")]
+fn newest_image_in(dir: &Path) -> Option<Vec<u8>> {
+    let mut best: Option<(std::time::SystemTime, Vec<u8>)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let Some(data) = read_wallpaper_file(&entry.path()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            best = Some((mtime, data));
+        }
+    }
+    best.map(|(_, data)| data)
+}
+
+/// Cheap sanity check that `data` decodes as an image.
+#[cfg(target_os = "linux")]
+fn is_valid_image(data: &[u8]) -> bool {
+    image::load_from_memory(data).is_ok()
 }
 
 #[cfg(not(target_os = "linux"))]
