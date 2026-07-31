@@ -1,20 +1,21 @@
 //! Oscilloscope-style synchronized waveform extraction.
 //!
-//! The trigger pipeline resolves a stable trigger point from audio samples
-//! using a priority chain (highest to lowest):
+//! The trigger pipeline resolves a stable trigger point from audio samples:
 //!
 //! 1. **YIN pitch detection** – estimates the fundamental period
-//! 2. **FIR low-pass filter** – removes high-frequency noise (800 Hz cutoff)
-//! 3. **Sub-sample zero-crossing** – precise rising-edge detection via cubic
-//!    root finding (highest-priority successful result)
-//! 4. **Correlation trigger** – period-synchronous auto-correlation fallback
-//! 5. **Peak position** – simple amplitude peak as last resort
+//! 2. **FIR low-pass filter** – removes high-frequency noise with an
+//!    adaptive cutoff that tracks the detected fundamental (~2.5×)
+//! 3. **Sub-sample zero-crossing** – precise rising-edge (negative →
+//!    positive) detection via cubic root finding, the only trigger used
+//! 4. **Polarity lock** – the displayed wave is correlated against the
+//!    previous frame and flipped when anti-correlated, keeping it stable on
+//!    harmonically dense material
 //!
 //! A window of `4×` the estimated period is extracted around the trigger
 //! point using cubic interpolation for sub-sample precision.  The extracted
 //! frame is suitable for oscilloscope-style waveform display.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// Lowest frequency the YIN pitch detector can resolve.
 const MIN_FREQ: f32 = 40.0;
@@ -26,8 +27,16 @@ const YIN_THRESHOLD: f32 = 0.15;
 const YIN_WINDOW: usize = 2048;
 /// Number of taps for the FIR low-pass filter.
 const FIR_NUM_TAPS: usize = 31;
-/// Cutoff frequency (Hz) for the FIR low-pass filter.
-const FIR_CUTOFF: f32 = 800.0;
+/// Trigger low-pass cutoff tracks `this ×` the detected fundamental
+/// (clamped to [`TRIGGER_CUTOFF_MIN`]–[`TRIGGER_CUTOFF_MAX`]) so the
+/// oscilloscope locks cleanly even when the EQ boosts harmonics.
+const TRIGGER_CUTOFF_MULT: f32 = 2.5;
+/// Minimum trigger low-pass cutoff (Hz).
+const TRIGGER_CUTOFF_MIN: f32 = 120.0;
+/// Maximum trigger low-pass cutoff (Hz).
+const TRIGGER_CUTOFF_MAX: f32 = 2000.0;
+/// Re-design the FIR filter only when the cutoff moves more than this (Hz).
+const FIR_REDESIGN_HYSTERESIS: f32 = 10.0;
 /// Multiple of the estimated period used to set the waveform extraction window.
 const PERIOD_MULTIPLIER: usize = 4;
 /// Minimum period (in samples) to prevent division-by-zero and spurious triggers.
@@ -35,8 +44,12 @@ const MIN_PERIOD_SAMPLES: f32 = 22.0;
 /// Minimum window duration (seconds) when extracting synchronised samples.
 const MIN_WINDOW_SECS: f32 = 0.015;
 
-/// Cached FIR low-pass coefficients (computed once, reused forever).
-static FIR_COEFFS: OnceLock<Vec<f32>> = OnceLock::new();
+// Thread-local cache of the trigger low-pass filter, re-designed whenever the
+// adaptive cutoff moves more than [`FIR_REDESIGN_HYSTERESIS`] Hz.
+thread_local! {
+    static FIR_CACHE: std::cell::RefCell<(f32, Vec<f32>)> =
+        std::cell::RefCell::new((0.0, Vec::new()));
+}
 
 /// Pre-allocated scratch buffers reused across frames to avoid heap churn.
 struct ReusableBuffers {
@@ -221,6 +234,19 @@ fn apply_fir_filter(samples: &[f32], coeffs: &[f32], out: &mut Vec<f32>) {
     }
 }
 
+/// Low-pass `samples` into `out` with an adaptive cutoff, re-using a cached
+/// FIR design until the cutoff drifts beyond [`FIR_REDESIGN_HYSTERESIS`] Hz.
+fn apply_trigger_filter(samples: &[f32], cutoff_hz: f32, sample_rate: f32, out: &mut Vec<f32>) {
+    FIR_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if (cache.0 - cutoff_hz).abs() > FIR_REDESIGN_HYSTERESIS {
+            cache.0 = cutoff_hz;
+            cache.1 = design_lowpass_fir(cutoff_hz, sample_rate, FIR_NUM_TAPS);
+        }
+        apply_fir_filter(samples, &cache.1, out);
+    });
+}
+
 /// Cubic Hermite interpolation at a fractional sample index.
 ///
 /// Uses four neighbours (`i-1`, `i`, `i+1`, `i+2`) and a Catmull-Rom
@@ -354,73 +380,6 @@ fn correct_octave(p: f32, prev: f32) -> f32 {
     }
 }
 
-/// Find the best trigger point by maximising the auto-correlation of the
-/// signal with itself delayed by one period.
-///
-/// Searches the first `min(period * 4, len/3)` samples for the offset that
-/// yields the highest dot-product between `samples[t..t+window]` and
-/// `samples[t+p..t+p+window]`.
-fn correlation_trigger(samples: &[f32], period: f32) -> Option<f32> {
-    let p = period.round() as usize;
-    let len = samples.len();
-    if p < 2 || p * 2 >= len {
-        return None;
-    }
-
-    let search_end = (len / 3).min(len - p * 2).min(p * 4);
-    let window = p.min(64);
-    if search_end < 1 || window < 1 {
-        return None;
-    }
-
-    let mut best = 0.0f32;
-    let mut best_corr = f32::MIN;
-
-    for t in 0..search_end {
-        let mut corr = 0.0;
-        for j in 0..window {
-            let a = samples[t + j];
-            let b = samples[t + j + p];
-            corr += a * b;
-        }
-        if corr > best_corr {
-            best_corr = corr;
-            best = t as f32;
-        }
-    }
-
-    if best_corr > 1e-6 {
-        Some(best)
-    } else {
-        None
-    }
-}
-
-/// Locate the absolute peak (maximum |amplitude|) from `start` onward.
-///
-/// Falls back to this method when zero-crossing and correlation triggers
-/// are unavailable.  Returns `None` if the peak amplitude is below 0.001.
-fn find_peak_position(samples: &[f32], start: usize) -> Option<f32> {
-    let len = samples.len();
-    if start >= len {
-        return None;
-    }
-    let mut max_idx = start;
-    let mut max_val = samples[start].abs();
-    for i in (start + 1)..len {
-        let val = samples[i].abs();
-        if val > max_val {
-            max_val = val;
-            max_idx = i;
-        }
-    }
-    if max_val > 0.001 {
-        Some(max_idx as f32)
-    } else {
-        None
-    }
-}
-
 /// Compute the RMS amplitude of a sample buffer.
 fn compute_rms(samples: &[f32]) -> f32 {
     let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
@@ -473,21 +432,26 @@ fn snap_to_rising_zero(samples: &[f32], trigger: f32, period: f32) -> f32 {
 /// The input is stereo interleaved (`L,R,L,R,…`).  It is down-mixed to
 /// mono, then the trigger pipeline runs:
 ///
-/// 1. **YIN pitch detection** (windowed to [`YIN_WINDOW`] samples) → estimated
+/// 1. **FIR low-pass filter** (adaptive cutoff from the previous frame's
+///    period) — also the input for YIN so high-frequency content cannot fool
+///    pitch detection
+/// 2. **YIN pitch detection** (windowed to [`YIN_WINDOW`] samples) → estimated
 ///    period (smoothed per-frame with octave correction and exponential
 ///    averaging)
-/// 2. **FIR low-pass filter** (windowed-sinc, 31 taps, 800 Hz cutoff; cached)
-/// 3. **Sub-sample zero-crossing** (highest-priority trigger)
-/// 4. **Correlation trigger** (period-synchronous auto-correlation)
-/// 5. **Peak position** (last resort)
+/// 3. **Sub-sample zero-crossing** — rising edge (negative → positive) only,
+///    refined by [`snap_to_rising_zero`]
+/// 4. **Polarity lock** against `last_window` so the wave stays stable instead
+///    of "turning over" on harmonically dense material
 ///
-/// The extracted window is `4 × period` samples long and uses cubic
-/// interpolation for sub-sample accuracy.
+/// The extracted window is `4 × period` samples long, taken from the raw mono
+/// signal with cubic interpolation.  `last_window` is overwritten with the
+/// frame actually displayed, for use as the reference next frame.
 pub fn synchronized_waveform(
     samples: Arc<Mutex<Vec<f32>>>,
     count: usize,
     sample_rate: f32,
     last_period: &mut f32,
+    last_window: &mut Vec<f32>,
 ) -> OscilloscopeFrame {
     let buf = samples.lock().unwrap();
 
@@ -534,7 +498,19 @@ pub fn synchronized_waveform(
         }
 
         let yin_len = rb.mono.len().min(YIN_WINDOW);
-        let pitch = yin_pitch_detection(&rb.mono[..yin_len], sample_rate, &mut rb.d, &mut rb.cmnd);
+
+        // Pitch detection runs on a low-passed copy so heavy 1kHz–20kHz content
+        // cannot fool YIN into locking onto high harmonics. The cutoff is derived
+        // from the previous frame's period (800 Hz until one is known).
+        let yin_cutoff = if *last_period > 0.0 {
+            (sample_rate / *last_period * TRIGGER_CUTOFF_MULT)
+                .clamp(TRIGGER_CUTOFF_MIN, TRIGGER_CUTOFF_MAX)
+        } else {
+            800.0
+        };
+        apply_trigger_filter(&rb.mono, yin_cutoff, sample_rate, &mut rb.filtered);
+
+        let pitch = yin_pitch_detection(&rb.filtered[..yin_len], sample_rate, &mut rb.d, &mut rb.cmnd);
         let new_period = pitch.map(|f| (sample_rate / f).max(MIN_PERIOD_SAMPLES));
 
         if let Some(p) = new_period {
@@ -549,28 +525,48 @@ pub fn synchronized_waveform(
 
         let period = *last_period;
 
+        // The trigger filter tracks the detected fundamental so the oscilloscope
+        // locks at a consistent phase even when the EQ boosts harmonics or the
+        // fundamental sits above the old fixed 800 Hz cutoff.
+        let fundamental_hz = sample_rate / period.max(1.0);
+        let trigger_cutoff =
+            (fundamental_hz * TRIGGER_CUTOFF_MULT).clamp(TRIGGER_CUTOFF_MIN, TRIGGER_CUTOFF_MAX);
+
         let min_window = (sample_rate * MIN_WINDOW_SECS) as usize;
         let window_size = (PERIOD_MULTIPLIER as f32 * period).ceil() as usize;
         let window_size = window_size.max(min_window).min(rb.mono.len() / 2);
 
-        let fir_coeffs = FIR_COEFFS.get_or_init(|| {
-            design_lowpass_fir(FIR_CUTOFF, sample_rate, FIR_NUM_TAPS)
-        });
-        apply_fir_filter(&rb.mono, fir_coeffs, &mut rb.filtered);
+        apply_trigger_filter(&rb.mono, trigger_cutoff, sample_rate, &mut rb.filtered);
 
-        let trigger = sub_sample_zero_crossing(&rb.filtered, 0);
-
-        let trigger = trigger.or_else(|| correlation_trigger(&rb.mono, period));
-
-        let trigger = trigger.or_else(|| find_peak_position(&rb.filtered, 0));
-
-        let trigger = trigger.unwrap_or(0.0);
+        let trigger = sub_sample_zero_crossing(&rb.filtered, 0).unwrap_or(0.0);
 
         let trigger = snap_to_rising_zero(&rb.filtered, trigger, period);
 
         let remaining = rb.mono.len() as f32 - trigger;
         let actual_window = window_size.min(remaining as usize).max(4);
-        let sync_samples = extract_window(&rb.mono, trigger, actual_window);
+        let mut sync_samples = extract_window(&rb.mono, trigger, actual_window);
+
+        // Polarity lock: if the new window anti-correlates with the previous
+        // displayed one, the trigger landed a half period away — flip it back
+        // so the wave stays stable instead of "turning over" on harmonically
+        // dense material.
+        if !last_window.is_empty() {
+            let n = sync_samples.len().min(last_window.len());
+            if n >= 8 {
+                let mut dot = 0.0;
+                for k in 0..n {
+                    dot += sync_samples[k] * last_window[k];
+                }
+                let norm = last_window.iter().map(|v| v * v).sum::<f32>().max(1e-9);
+                if dot / norm < 0.0 {
+                    for s in &mut sync_samples {
+                        *s = -*s;
+                    }
+                }
+            }
+        }
+        last_window.clear();
+        last_window.extend_from_slice(&sync_samples);
 
         OscilloscopeFrame {
             samples: sync_samples,

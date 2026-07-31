@@ -18,6 +18,7 @@ pub struct SpectrumVisualizer {
     stripes: BeatStripe,
     pub loudness: f32,
     pub last_period: f32,
+    pub last_wave_window: Vec<f32>,
     tooltip: TooltipColors,
     last_palette_hash: u64,
 }
@@ -54,6 +55,7 @@ impl SpectrumVisualizer {
             config,
             loudness: -100.0,
             last_period: 0.0,
+            last_wave_window: Vec::new(),
             tooltip: TooltipColors::from_palette(&M3Palette::default()),
             last_palette_hash: 0,
         }

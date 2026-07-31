@@ -178,6 +178,7 @@ impl eframe::App for PlayerApp {
                 8192,
                 self.player.get_sample_rate(),
                 &mut self.visualizer.last_period,
+                &mut self.visualizer.last_wave_window,
             );
 
             draw_waveform_raw(&painter, rect, &wave, wave_col, Color32::from_black_alpha(25));
