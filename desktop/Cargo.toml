@@ -3,6 +3,10 @@ name = "ReAmped"
 version = "1.2.2"
 edition = "2024"
 
+[features]
+default = ["bit-perfect-backend"]
+bit-perfect-backend = ["player_core/bit-perfect-backend"]
+
 [dependencies]
 dirs-next = "2.0.0"
 eframe = "0.33.3"

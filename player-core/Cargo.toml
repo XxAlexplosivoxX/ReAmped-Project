@@ -4,9 +4,13 @@ version = "0.3.1"
 edition = "2024"
 
 [features]
-default = ["symphonia-backend"]
+default = ["symphonia-backend", "bit-perfect-backend"]
 symphonia-backend = []
+bit-perfect-backend = ["dep:alsa"]
 c-ffi = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = { version = "0.10", optional = true }
 
 [dependencies]
 lofty = "0.24.0"

@@ -1,34 +1,54 @@
 //! Audio backend abstraction for the player.
 //!
 //! Defines the [`AudioBackend`] trait that all audio backends must implement,
-//! along with sub-modules for crossfade math, visualisation data sharing, and
-//! the Symphonia-based CPAL backend.
+//! along with sub-modules for crossfade math, visualisation data sharing, the
+//! Symphonia-based CPAL backend, and the direct-ALSA bit-perfect backend.
 
+use std::fmt;
 use std::path::Path;
 
 use crate::Track;
 use crate::audio::viz_source::SharedSamples;
 
 pub mod crossfade;
+pub mod decode;
+pub mod dispatcher;
 pub mod symphonia_backend;
 pub mod viz_source;
+
+#[cfg(all(target_os = "linux", feature = "bit-perfect-backend"))]
+pub mod alsa_backend;
+
+/// Error produced when a backend fails to initialise a playback session.
+#[derive(Debug, Clone)]
+pub struct BackendError(pub String);
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BackendError {}
 
 /// Unified audio backend trait.
 ///
 /// Implementations must manage at least one decode thread feeding a ring-buffer
-/// that the CPAL output callback drains.
+/// that the audio output (CPAL callback or ALSA writer thread) drains.
 pub trait AudioBackend {
     // ---- Lifecycle ----
     /// Load and begin decoding a track.
     ///
     /// Stops any current playback and aborts any pending crossfade before
-    /// spawning a new decode thread and CPAL output stream.
-    fn load(&mut self, track: &Track);
+    /// spawning a new decode thread and output stream. Returns an error only
+    /// when the output cannot be opened for the track's native format (in
+    /// which case the caller may fall back to another backend).
+    fn load(&mut self, track: &Track) -> Result<(), BackendError>;
     /// Start or resume playback with a short fade-in.
     fn play(&mut self);
     /// Pause playback, freezing the position counter until [`Self::play`] is called again.
     fn pause(&mut self);
-    /// Stop playback, join decode threads, and release the CPAL stream.
+    /// Stop playback, join decode threads, and release the output stream.
     fn stop(&mut self);
     /// Seek to `seconds` into the track and restart decoding from that position.
     fn seek(&mut self, path: &Path, seconds: f32);
@@ -39,9 +59,10 @@ pub trait AudioBackend {
     /// Whether audio is currently being output. Stays `true` during a pause
     /// fade-out and only turns `false` once the output has gone silent.
     fn is_audible(&self) -> bool;
-    /// Output sample rate of the CPAL stream in Hz.
+    /// Output sample rate in Hz. For the bit-perfect backend this is the
+    /// current track's native sample rate; for CPAL it is the device rate.
     fn sample_rate(&self) -> f32;
-    /// Shared buffer that the output callback fills with interleaved stereo samples
+    /// Shared buffer that the output thread fills with interleaved stereo samples
     /// for the UI to render as a waveform.
     fn samples(&self) -> SharedSamples;
     /// Whether the decode thread has reached end-of-file.
@@ -63,8 +84,9 @@ pub trait AudioBackend {
 
     // ---- Silence trim ----
     /// Configure silence trimming: skip `start_secs` from the beginning and
-    /// stop after `total_output_frames` frames.
-    fn set_trim(&mut self, start_secs: f32, end_secs: f32, total_output_frames: u32);
+    /// stop after `effective_duration_secs` seconds of output have been
+    /// decoded (the backend scales this by its own output sample rate).
+    fn set_trim(&mut self, start_secs: f32, end_secs: f32, effective_duration_secs: f32);
     /// Start trim offset in seconds.
     fn trim_start(&self) -> f32;
     /// End trim offset in seconds.
@@ -73,13 +95,17 @@ pub trait AudioBackend {
     // ---- Crossfade primitives ----
     /// Start decoding the next track into a secondary ring-buffer.
     /// Seeks to `trim_start` so only the effective audio is decoded.
-    fn prepare_next(&mut self, path: &Path, trim_start: f32);
+    ///
+    /// Returns `false` when the next track cannot be prepared for a seamless
+    /// transition (e.g. its native sample rate differs from the current
+    /// track's in bit-perfect mode), in which case no crossfade should start.
+    fn prepare_next(&mut self, path: &Path, trim_start: f32) -> bool;
 
-    /// Begin crossfade mixing in the CPAL callback.
+    /// Begin crossfade mixing in the output thread.
     /// Resets the micro-fade counter.
     fn start_crossfade(&mut self, duration_ms: u32);
 
-    /// Whether the callback is currently crossfade-mixing.
+    /// Whether the output thread is currently crossfade-mixing.
     fn is_crossfade_active(&self) -> bool;
 
     /// Has the next-track decode thread reached EOF?
@@ -91,11 +117,11 @@ pub trait AudioBackend {
     /// Override crossfade gains (used when resuming from a pause during fade).
     fn set_crossfade_gains(&self, out: f32, in_: f32);
 
-    /// Resume crossfade mixing in the audio callback after a pause.
+    /// Resume crossfade mixing in the audio output after a pause.
     ///
     /// The gains are expected to have been restored via
     /// [`set_crossfade_gains`] already; this method only flags the
-    /// `xfade_active` atomic back to `true` so the callback's mixing
+    /// `xfade_active` atomic back to `true` so the output thread's mixing
     /// branch is re-entered.
     fn resume_crossfade(&self);
 
@@ -114,4 +140,11 @@ pub trait AudioBackend {
 
     /// Has the current track stopped producing samples?
     fn consumer_depleted(&self) -> bool;
+
+    /// Whether this backend outputs audio in its native bit depth and rate
+    /// (i.e. without resampling). Used by the dispatcher to know whether a
+    /// failed [`load`](Self::load) warrants falling back to CPAL.
+    fn supports_bit_perfect(&self) -> bool {
+        false
+    }
 }

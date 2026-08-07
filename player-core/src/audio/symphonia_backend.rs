@@ -5,53 +5,37 @@
 //! for cross-platform audio output. Decode runs in a dedicated thread that
 //! feeds a lock-free ring buffer; the CPAL output callback drains that buffer
 //! and applies DSP (EQ, stereo widening, volume, crossfade mixing).
+//!
+//! This is the default (fallback) backend used when bit-perfect mode is
+//! disabled, unsupported by the hardware, or when the device is busy.
 
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
-    thread::{self, sleep},
-    time::{Duration, Instant},
+    thread,
+    time::Instant,
 };
 
-use audioadapter_buffers::number_to_float::InterleavedNumbers;
 use atomic_float::AtomicF32;
 use cpal::{
     Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use ringbuf::{Consumer, Producer, RingBuffer};
-use rubato::{Fft, Resampler};
+use ringbuf::{Consumer, RingBuffer};
 
-use symphonia::{
-    core::{
-        audio::SampleBuffer,
-        codecs::DecoderOptions,
-        formats::{FormatOptions, SeekMode, SeekTo},
-        io::MediaSourceStream,
-        meta::MetadataOptions,
-        probe::Hint,
-    },
-    default::get_probe,
+use super::{
+    AudioBackend, BackendError, crossfade,
+    decode::{self, RING_CAPACITY_FRAMES},
+    viz_source::SharedSamples,
 };
-
-use super::{AudioBackend, crossfade, viz_source::SharedSamples};
 use crate::{
     Track,
     config::load_config,
     dsp::{db_meter::DbMeter, mini_eq::TripleBandEq, xpander::Expander},
 };
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Size of the ring buffer (in stereo frames) for each decode thread.
-/// At 48 kHz this gives ≈ 4 seconds of buffer.
-const RING_CAPACITY_FRAMES: usize = 192_000;
 
 // ---------------------------------------------------------------------------
 // SymphoniaBackend
@@ -124,7 +108,8 @@ pub struct SymphoniaBackend {
     // Silence trim
     trim_start: Arc<AtomicF32>,
     trim_end: Arc<AtomicF32>,
-    max_output_frames: Arc<AtomicU32>,
+    effective_duration_secs: Arc<AtomicF32>,
+    next_effective_duration_secs: Arc<AtomicF32>,
 }
 
 impl SymphoniaBackend {
@@ -170,7 +155,8 @@ impl SymphoniaBackend {
             xfade_consumer: Arc::new(Mutex::new(None)),
             trim_start: Arc::new(AtomicF32::new(0.0)),
             trim_end: Arc::new(AtomicF32::new(0.0)),
-            max_output_frames: Arc::new(AtomicU32::new(u32::MAX)),
+            effective_duration_secs: Arc::new(AtomicF32::new(f32::INFINITY)),
+            next_effective_duration_secs: Arc::new(AtomicF32::new(f32::INFINITY)),
         }
     }
 
@@ -219,12 +205,12 @@ impl SymphoniaBackend {
         let xfade_out = self.xfade_out_gain.clone();
         let xfade_in = self.xfade_in_gain.clone();
         let xfade_micro = self.xfade_micro_frame.clone();
-        let max_frames = self.max_output_frames.clone();
+        let effective_dur = self.effective_duration_secs.clone();
 
         let decode_handle = thread::spawn(move || {
-            Self::decode_loop(
+            decode::decode_loop(
                 &path, output_sr, producer, &alive_cl, &pl, &finished,
-                max_frames, seek_seconds, samples_viz_decode,
+                &effective_dur, seek_seconds, samples_viz_decode,
             );
         });
         self.decode_handle = Some(decode_handle);
@@ -383,238 +369,7 @@ impl SymphoniaBackend {
         stream.play().unwrap();
         self.stream = Some(stream);
     }
-
-    // -----------------------------------------------------------------------
-    // Static decode loop (shared by primary and next decode threads)
-    // -----------------------------------------------------------------------
-    //
-    // Opens the file at `path`, probes the format with Symphonia, creates a
-    // decoder, seeks to `seek_seconds`, and decodes audio frames into the
-    // `producer` ring buffer. Resampling from the file's sample rate to
-    // `output_sr` is done via rubato. The loop exits when the file ends,
-    // `max_frames` is reached, or `alive` becomes false.
-    //
-    // The `playing` flag allows the caller to pause decoding without killing
-    // the thread (decoder sleeps instead of busy-waiting).
-
-    #[allow(clippy::too_many_arguments)]
-    fn decode_loop(
-        path: &Path,
-        output_sr: usize,
-        mut producer: Producer<f32>,
-        alive: &AtomicBool,
-        playing: &AtomicBool,
-        finished: &AtomicBool,
-        max_frames: Arc<AtomicU32>,
-        seek_seconds: f32,
-        _samples_viz: SharedSamples,
-    ) {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[Decode] failed to open '{}': {}", path.display(), e);
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let probed = match get_probe().format(
-            &Hint::new(),
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[Decode] probe failed '{}': {:?}", path.display(), e);
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let mut format = probed.format;
-        let track = match format.default_track() {
-            Some(t) => t,
-            None => {
-                eprintln!("[Decode] no default track in '{}'", path.display());
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let channels = match track.codec_params.channels {
-            Some(c) => c.count(),
-            None => {
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let input_sr = match track.codec_params.sample_rate {
-            Some(sr) => sr as usize,
-            None => {
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let mut params = track.codec_params.clone();
-        params.sample_rate = Some(output_sr as u32);
-
-        let mut decoder = match symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("[Decode] decoder error: {e:?}");
-                finished.store(true, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        // Seek to requested position
-        if seek_seconds > 0.0 {
-            let _ = format.seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time: seek_seconds.into(),
-                    track_id: Some(track.id),
-                },
-            );
-        }
-
-        let max_frame_limit = max_frames.load(Ordering::Relaxed);
-        let mut frames_pushed: u32 = 0;
-        let chunk_size = 128;
-        let mut interleaved = Vec::<f32>::new();
-
-        let mut resampler = Fft::<f32>::new(
-            input_sr, output_sr, chunk_size, 2, channels,
-            rubato::FixedSync::Output,
-        )
-        .unwrap();
-
-        while alive.load(Ordering::SeqCst) {
-            // Stop decoding when we've pushed enough frames (silence trim)
-            if frames_pushed >= max_frame_limit {
-                break;
-            }
-
-            // When paused (primary thread only), sleep to save CPU
-            if !playing.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(5));
-                continue;
-            }
-
-            let packet = match format.next_packet() {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-
-            let decoded = match decoder.decode(&packet) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-            buf.copy_interleaved_ref(decoded);
-
-            for frame_samples in buf.samples().chunks(channels) {
-                let (l, r) = if channels == 1 {
-                    (frame_samples[0], frame_samples[0])
-                } else {
-                    (frame_samples[0], frame_samples[1])
-                };
-                interleaved.push(l);
-                interleaved.push(r);
-
-                let needed = resampler.input_frames_next();
-                if interleaved.len() >= needed * 2 {
-                    let input =
-                        InterleavedNumbers::new(&interleaved[..needed * 2], 2, needed).unwrap();
-                    let output = resampler.process(&input, 0, None).unwrap();
-                    let out = output.take_data();
-
-                    // Wait for space in ring buffer
-                    while alive.load(Ordering::SeqCst)
-                        && producer.len() + out.len() > producer.capacity()
-                    {
-                        thread::sleep(Duration::from_millis(1));
-                    }
-                    if !alive.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    let n_frames = out.len() / 2;
-                    if frames_pushed + n_frames as u32 > max_frame_limit {
-                        let allowed = (max_frame_limit - frames_pushed) as usize * 2;
-                        if allowed > 0 {
-                            let _ = producer.push_slice(&out[..allowed]);
-                        }
-                        break;
-                    }
-                    let _ = producer.push_slice(&out);
-                    frames_pushed += n_frames as u32;
-
-                    interleaved.drain(..needed * 2);
-                }
-                if interleaved.capacity() > 8192 {
-                    interleaved.shrink_to(4096);
-                }
-            }
-        }
-
-        // Flush remaining samples through resampler
-        while alive.load(Ordering::SeqCst) && !interleaved.is_empty() {
-            let needed = resampler.input_frames_next();
-            if needed == 0 {
-                break;
-            }
-            let mut buf_in = interleaved.clone();
-            if buf_in.len() < needed * 2 {
-                buf_in.resize(needed * 2, 0.0);
-            }
-            let input = match InterleavedNumbers::new(&buf_in[..needed * 2], 2, needed) {
-                Ok(i) => i,
-                Err(_) => break,
-            };
-            let output = match resampler.process(&input, 0, None) {
-                Ok(o) => o,
-                Err(_) => break,
-            };
-            let out = output.take_data();
-            while alive.load(Ordering::SeqCst)
-                && producer.len() + out.len() > producer.capacity()
-            {
-                thread::sleep(Duration::from_millis(1));
-            }
-            if !alive.load(Ordering::SeqCst) {
-                break;
-            }
-            if !out.is_empty() {
-                let n_frames = out.len() / 2;
-                if frames_pushed + n_frames as u32 > max_frame_limit {
-                    let allowed = (max_frame_limit - frames_pushed) as usize * 2;
-                    if allowed > 0 {
-                        let _ = producer.push_slice(&out[..allowed]);
-                    }
-                    break;
-                }
-                let _ = producer.push_slice(&out);
-                frames_pushed += n_frames as u32;
-            }
-            if interleaved.len() >= needed * 2 {
-                interleaved.drain(..needed * 2);
-            } else {
-                interleaved.clear();
-            }
-        }
-
-        // Let consumer drain before signalling finished
-        sleep(Duration::from_millis(100));
-        finished.store(true, Ordering::SeqCst);
-    }
 }
-
 // ===========================================================================
 // AudioBackend trait implementation
 // ===========================================================================
@@ -623,11 +378,12 @@ impl AudioBackend for SymphoniaBackend {
     /// Load a track: stop current playback, abort any crossfade, and spawn a
     /// new decode thread plus CPAL output stream. The decoder seeks to
     /// `trim_start` so silence at the beginning of the file is skipped.
-    fn load(&mut self, track: &Track) {
+    fn load(&mut self, track: &Track) -> Result<(), BackendError> {
         self.stop();
         self.crossfade_abort();
         let seek = self.trim_start.load(Ordering::SeqCst);
         self.spawn_player(&track.path, seek);
+        Ok(())
     }
 
     /// Start or resume playback with a short fade-in (state = 1).
@@ -807,13 +563,13 @@ impl AudioBackend for SymphoniaBackend {
     /// Configure silence trimming.
     ///
     /// * `start_secs` — seconds to skip from the beginning of the file
-    /// * `end_secs` — seconds to trim from the end (not directly used here;
-    ///   `total_output_frames` is the effective limit)
-    /// * `total_output_frames` — maximum number of output frames to decode
-    fn set_trim(&mut self, start_secs: f32, end_secs: f32, total_output_frames: u32) {
+    /// * `end_secs` — seconds to trim from the end (not directly used here)
+    /// * `effective_duration_secs` — maximum output duration to decode,
+    ///   scaled by the output sample rate to bound the frame count
+    fn set_trim(&mut self, start_secs: f32, end_secs: f32, effective_duration_secs: f32) {
         self.trim_start.store(start_secs, Ordering::SeqCst);
         self.trim_end.store(end_secs, Ordering::SeqCst);
-        self.max_output_frames.store(total_output_frames, Ordering::SeqCst);
+        self.effective_duration_secs.store(effective_duration_secs, Ordering::SeqCst);
     }
 
     /// Start trim offset in seconds.
@@ -834,10 +590,11 @@ impl AudioBackend for SymphoniaBackend {
     /// (`next_alive` / `next_finished`) and feeds `xfade_consumer`.
     /// The consumer is hot-swapped to `primary_consumer` when the
     /// crossfade completes (see [`crossfade_swap`](Self::crossfade_swap)).
-    fn prepare_next(&mut self, path: &Path, trim_start: f32) {
+    fn prepare_next(&mut self, path: &Path, trim_start: f32) -> bool {
         self.crossfade_abort();
         self.next_alive.store(true, Ordering::SeqCst);
         self.next_finished.store(false, Ordering::SeqCst);
+        self.next_effective_duration_secs.store(f32::INFINITY, Ordering::SeqCst);
 
         let output_sr = self.sample_rate as usize;
         let ring = RingBuffer::<f32>::new(RING_CAPACITY_FRAMES * 2);
@@ -853,18 +610,18 @@ impl AudioBackend for SymphoniaBackend {
         // that keep the thread alive until explicitly killed.
         let dummy_playing = Arc::new(AtomicBool::new(true));
         let dummy_finished = finished_out.clone();
-        let max_frames_dummy = Arc::new(AtomicU32::new(u32::MAX));
+        let effective_dur_dummy = self.next_effective_duration_secs.clone();
         let samples_dummy = Arc::new(Mutex::new(Vec::new()));
 
         let handle = thread::spawn(move || {
-            SymphoniaBackend::decode_loop(
+            decode::decode_loop(
                 &path_for_closure,
                 output_sr,
                 producer,
                 &alive,
                 &dummy_playing,
                 &dummy_finished,
-                max_frames_dummy,
+                &effective_dur_dummy,
                 trim_start,
                 samples_dummy,
             );
@@ -872,6 +629,7 @@ impl AudioBackend for SymphoniaBackend {
 
         self.next_decode_handle = Some(handle);
         self.next_path = Some(path_for_store);
+        true
     }
 
     /// Begin the crossfade in the CPAL callback.
@@ -950,6 +708,13 @@ impl AudioBackend for SymphoniaBackend {
         // Promote next decode to primary
         self.decode_handle = next_decode;
         self.next_decode_handle = None;
+
+        // Promote the next-track duration limit so subsequent set_trim calls
+        // bound the promoted decode thread.
+        self.effective_duration_secs = std::mem::replace(
+            &mut self.next_effective_duration_secs,
+            Arc::new(AtomicF32::new(f32::INFINITY)),
+        );
 
         // Reset crossfade state
         self.xfade_active.store(false, Ordering::SeqCst);

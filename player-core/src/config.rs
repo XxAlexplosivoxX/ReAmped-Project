@@ -71,6 +71,15 @@ pub struct AppConfig {
     /// Enable vsync (may cause freezes on Hyprland when switching workspaces).
     #[serde(default = "default_true")]
     pub vsync: bool,
+    /// Play bit-perfect audio through direct ALSA hardware access
+    /// (bypasses PulseAudio/PipeWire/dmix and software resampling).
+    /// Falls back to the CPAL backend when unsupported or unavailable.
+    #[serde(default)]
+    pub bit_perfect_enabled: bool,
+    /// ALSA device name for bit-perfect playback (e.g. `hw:0,0`).
+    /// When empty, the first available `hw:` playback device is used.
+    #[serde(default)]
+    pub bit_perfect_device: String,
 }
 
 fn default_eq_gain() -> f32 { 1.0 }
@@ -230,6 +239,8 @@ impl Default for AppConfig {
             width_val: 1.0,
             target_fps: default_fps(),
             vsync: default_true(),
+            bit_perfect_enabled: false,
+            bit_perfect_device: String::new(),
         }
     }
 }

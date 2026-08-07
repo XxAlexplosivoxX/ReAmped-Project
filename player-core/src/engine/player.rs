@@ -65,7 +65,7 @@ use super::state::PlayerState;
 use super::track::Track;
 use super::event::{Event, EventBus};
 use crate::audio::crossfade::{CrossfadePhase, equal_power_gains};
-use crate::audio::{AudioBackend, symphonia_backend::SymphoniaBackend};
+use crate::audio::{AudioBackend, dispatcher::BackendDispatcher};
 use crate::audio::viz_source::SharedSamples;
 use crate::config::load_config;
 use crate::dsp::silence_detector::detect_silence;
@@ -86,7 +86,7 @@ const ABORT_FADE_MS: u64 = 10;
 // Helper: load a track into the backend
 // ---------------------------------------------------------------------------
 
-/// Load a track into the [`SymphoniaBackend`] and update [`PlayerState`].
+/// Load a track into the backend and update [`PlayerState`].
 ///
 /// This is called on explicit track changes (play, next, prev, jump, …) but
 /// *not* during crossfade completion (where the backend is already prepared).
@@ -94,7 +94,7 @@ const ABORT_FADE_MS: u64 = 10;
 /// It reads metadata and silence-trim settings, updates `backend` trim/load,
 /// and writes the new title, duration, cover, and position into `state`.
 fn load_track(
-    backend: &mut SymphoniaBackend,
+    backend: &mut BackendDispatcher,
     track: &Track,
     playlist_idx: usize,
     state: &Arc<Mutex<PlayerState>>,
@@ -110,9 +110,12 @@ fn load_track(
     };
 
     let effective_dur = (raw_dur - ts - te).max(0.0);
-    let total_frames = (effective_dur * backend.sample_rate()) as u32;
-    backend.set_trim(ts, te, total_frames);
-    backend.load(track);
+    backend.set_trim(ts, te, effective_dur);
+    if let Err(e) = backend.load(track) {
+        eprintln!("[Engine] failed to load '{}': {e}", track.path.display());
+        state.lock().unwrap().playing = false;
+        return;
+    }
 
     let mut s = state.lock().unwrap();
     if let Some(ref m) = metadata {
@@ -227,7 +230,7 @@ fn audio_loop(
     db_r: Arc<AtomicF32>,
     event_bus: EventBus,
 ) {
-    let mut backend = SymphoniaBackend::new(samples);
+    let mut backend = BackendDispatcher::new(samples);
     let mut playlist: Vec<Track> = Vec::new();
     let mut current_index: usize = 0;
     let mut shuffle = false;
@@ -311,7 +314,14 @@ fn audio_loop(
                         (0.0, 0.0)
                     };
 
-                    backend.prepare_next(&next_track.path, next_ts);
+                    let prepared = backend.prepare_next(&next_track.path, next_ts);
+                    if !prepared {
+                        eprintln!(
+                            "[Engine] cannot crossfade into '{}': sample rate/format mismatch",
+                            next_track.path.display()
+                        );
+                        continue;
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                     let xf_ms = (xf_sec * 1000.0) as u32;
                     backend.start_crossfade(xf_ms);
@@ -363,8 +373,7 @@ fn audio_loop(
                     (0.0, 0.0)
                 };
                 let eff_dur = (raw_dur - ts - te).max(0.0);
-                let total_frames = (eff_dur * backend.sample_rate()) as u32;
-                backend.set_trim(ts, te, total_frames);
+                backend.set_trim(ts, te, eff_dur);
 
                 let mut s = state.lock().unwrap();
                 if let Some(ref m) = metadata {

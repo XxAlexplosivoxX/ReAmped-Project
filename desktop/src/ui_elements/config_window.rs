@@ -252,6 +252,39 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                                 save_config(&cfg);
                             }
 
+                            #[cfg(all(target_os = "linux", feature = "bit-perfect-backend"))]
+                            {
+                                ui.add_space(6.0);
+                                if ui
+                                    .checkbox(
+                                        &mut cfg.bit_perfect_enabled,
+                                        "Salida bit-perfect (ALSA directo, sin resampleo)",
+                                    )
+                                    .changed()
+                                {
+                                    save_config(&cfg);
+                                }
+                                if cfg.bit_perfect_enabled {
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut cfg.bit_perfect_device)
+                                                .hint_text("hw:0,0 (vacío = auto-detect)"),
+                                        )
+                                        .changed()
+                                    {
+                                        save_config(&cfg);
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Requiere una tarjeta que acepte la frecuencia y formato nativos \
+                                             del archivo; si no, se usa CPAL como respaldo.",
+                                        )
+                                        .small()
+                                        .weak(),
+                                    );
+                                }
+                            }
+
                             ui.add_space(10.0);
                             ui.heading("Atajos de teclado");
                             ui.separator();
