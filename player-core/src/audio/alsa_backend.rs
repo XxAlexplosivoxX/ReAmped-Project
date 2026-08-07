@@ -38,7 +38,8 @@ use std::{
 
 use alsa::{
     Direction, ValueOr,
-    card::Card,
+    card::{Card, Iter as CardIter},
+    ctl::{Ctl, DeviceIter},
     device_name::HintIter,
     pcm::{Access, Format as AlsaFormat, HwParams, PCM, State},
 };
@@ -356,11 +357,14 @@ impl AlsaBackend {
             }
         }
 
-        // Fallback: scan raw card/device indices — covers devices not
-        // enumerated by the hint interface (e.g. HDMI).
-        for card_idx in 0..32 {
-            for dev_idx in 0..32 {
-                let dev = format!("hw:{card_idx},{dev_idx}");
+        // Fallback: enumerate real cards and their PCM devices — covers
+        // devices not listed by the hint interface (e.g. HDMI).
+        for card in CardIter::new().flatten() {
+            let Ok(ctl) = Ctl::new(&format!("hw:{}", card.get_index()), false) else {
+                continue;
+            };
+            for dev_idx in DeviceIter::new(&ctl) {
+                let dev = format!("hw:{},{}", card.get_index(), dev_idx);
                 if Self::can_open(&dev) {
                     return Ok(dev);
                 }
@@ -391,35 +395,27 @@ impl AlsaBackend {
                     && !seen.contains(&name)
                 {
                     seen.push(name.clone());
-                    devices.push((Self::describe_device(&name), name));
+                    devices.push((name.clone(), name));
                 }
             }
         }
 
-        // Fallback: scan raw card/device indices — covers devices not
-        // enumerated by the hint interface (e.g. HDMI).
-        for card_idx in 0..32 {
-            for dev_idx in 0..32 {
-                let dev = format!("hw:{card_idx},{dev_idx}");
-                if Self::can_open(&dev) && !seen.contains(&dev) {
+        // Enumerate real hardware: iterate actual cards and their PCM
+        // devices (no blind index guessing, so ALSA stays silent).
+        for card in CardIter::new().flatten() {
+            let Ok(ctl) = Ctl::new(&format!("hw:{}", card.get_index()), false) else {
+                continue;
+            };
+            let card_name = card.get_name().unwrap_or_default();
+            for dev_idx in DeviceIter::new(&ctl) {
+                let dev = format!("hw:{},{}", card.get_index(), dev_idx);
+                if !seen.contains(&dev) && Self::can_open(&dev) {
                     seen.push(dev.clone());
-                    devices.push((Self::describe_device(&dev), dev));
+                    devices.push((format!("{dev} · {card_name}"), dev));
                 }
             }
         }
         devices
-    }
-
-    /// Human-readable label for a `hw:C,D` device (e.g. `hw:0,3 · HD-Audio`).
-    fn describe_device(dev: &str) -> String {
-        if let Some((card_part, _)) = dev.split_once(',') {
-            if let Ok(name) = CString::new(card_part)
-                && let Ok(card) = Card::from_str(&name)
-            {
-                return format!("{dev} · {}", card.get_name().unwrap_or_default());
-            }
-        }
-        dev.to_string()
     }
 
     /// Open the hardware device configured for the file's native rate and the
