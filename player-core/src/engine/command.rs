@@ -87,4 +87,8 @@ pub enum PlayerCommand {
     SetGainHigh(f32),
     /// Set the stereo expander width factor.
     SetExpanderWidth(f32),
+    /// Reconfigure the output backend on the fly: enable/disable bit-perfect
+    /// ALSA output and/or change the target device. The engine rebuilds the
+    /// backend and reloads the current track so the change applies immediately.
+    SetBitPerfectBackend { enabled: bool, device: String },
 }

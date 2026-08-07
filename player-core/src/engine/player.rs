@@ -746,6 +746,33 @@ fn audio_loop(
                     state.lock().unwrap().volume = v;
                 }
 
+                // ---- Reconfigure output backend on the fly ----
+                // Rebuilds the dispatcher (bit-perfect ALSA vs CPAL, device
+                // selection) and reloads the current track so the change is
+                // audible immediately. The playback position is preserved.
+                PlayerCommand::SetBitPerfectBackend { enabled, device } => {
+                    if backend.reconfigure(enabled, &device) && !playlist.is_empty() {
+                        xfade_phase = CrossfadePhase::Idle;
+                        backend.crossfade_abort();
+                        let was_playing = state.lock().unwrap().playing;
+                        let pos = state.lock().unwrap().position;
+                        let track = &playlist[current_index];
+                        load_track(&mut backend, track, current_index, &state);
+                        let mut s = state.lock().unwrap();
+                        if was_playing {
+                            s.position = pos;
+                            drop(s);
+                            backend.seek(&track.path, pos);
+                        } else {
+                            backend.pause();
+                            s.playing = false;
+                            s.position = 0.0;
+                        }
+                        event_bus.publish(Event::TrackChanged(current_index));
+                        event_bus.publish(Event::StateChanged);
+                    }
+                }
+
                 // ---- Toggle shuffle ----
                 // Flips shuffle on/off. When enabling, builds a shuffled
                 // index list and pins the current track to position 0 so it

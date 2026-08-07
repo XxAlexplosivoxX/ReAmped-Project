@@ -254,7 +254,10 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
 
                             #[cfg(all(target_os = "linux", feature = "bit-perfect-backend"))]
                             {
+                                use player_core::PlayerCommand;
+
                                 ui.add_space(6.0);
+                                let mut apply_backend = false;
                                 if ui
                                     .checkbox(
                                         &mut cfg.bit_perfect_enabled,
@@ -262,17 +265,64 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                                     )
                                     .changed()
                                 {
-                                    save_config(&cfg);
+                                    apply_backend = true;
                                 }
                                 if cfg.bit_perfect_enabled {
-                                    if ui
-                                        .add(
-                                            egui::TextEdit::singleline(&mut cfg.bit_perfect_device)
-                                                .hint_text("hw:0,0 (vacío = auto-detect)"),
-                                        )
-                                        .changed()
-                                    {
-                                        save_config(&cfg);
+                                    let devices =
+                                        player_core::audio::alsa_backend::AlsaBackend::list_devices();
+                                    let mut selected = if cfg.bit_perfect_device.trim().is_empty() {
+                                        "auto".to_string()
+                                    } else {
+                                        cfg.bit_perfect_device.clone()
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label("Dispositivo:");
+                                        let mut changed = false;
+                                        egui::ComboBox::from_id_salt("bit_perfect_device")
+                                            .selected_text(if selected == "auto" {
+                                                "Auto (detectar)".to_string()
+                                            } else {
+                                                selected.clone()
+                                            })
+                                            .show_ui(ui, |ui| {
+                                                if ui
+                                                    .selectable_label(selected == "auto", "Auto (detectar)")
+                                                    .clicked()
+                                                {
+                                                    selected = "auto".to_string();
+                                                    changed = true;
+                                                }
+                                                for (display, value) in &devices {
+                                                    if ui
+                                                        .selectable_label(
+                                                            *value == selected,
+                                                            display,
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        selected = value.clone();
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        if changed {
+                                            cfg.bit_perfect_device = if selected == "auto" {
+                                                String::new()
+                                            } else {
+                                                selected.clone()
+                                            };
+                                            apply_backend = true;
+                                        }
+                                    });
+                                    if cfg.bit_perfect_device.trim().is_empty() && !devices.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Se usará: {}",
+                                                devices[0].0
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
                                     }
                                     ui.label(
                                         egui::RichText::new(
@@ -282,6 +332,13 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                                         .small()
                                         .weak(),
                                     );
+                                }
+                                if apply_backend {
+                                    save_config(&cfg);
+                                    player.player.send(PlayerCommand::SetBitPerfectBackend {
+                                        enabled: cfg.bit_perfect_enabled,
+                                        device: cfg.bit_perfect_device.clone(),
+                                    });
                                 }
                             }
 

@@ -374,6 +374,54 @@ impl AlsaBackend {
         PCM::new(name, Direction::Playback, false).is_ok()
     }
 
+    /// Enumerate usable `hw:` playback devices as `(display, value)` pairs.
+    ///
+    /// The display label includes the card name when resolvable; `value` is
+    /// the ALSA device name to store in the configuration. Returns an empty
+    /// list when no playback device is available.
+    pub fn list_devices() -> Vec<(String, String)> {
+        let mut devices: Vec<(String, String)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+
+        if let Ok(hints) = HintIter::new_str(None, "pcm") {
+            for hint in hints {
+                if let Some(name) = hint.name
+                    && name.starts_with("hw:")
+                    && Self::can_open(&name)
+                    && !seen.contains(&name)
+                {
+                    seen.push(name.clone());
+                    devices.push((Self::describe_device(&name), name));
+                }
+            }
+        }
+
+        // Fallback: scan raw card/device indices — covers devices not
+        // enumerated by the hint interface (e.g. HDMI).
+        for card_idx in 0..32 {
+            for dev_idx in 0..32 {
+                let dev = format!("hw:{card_idx},{dev_idx}");
+                if Self::can_open(&dev) && !seen.contains(&dev) {
+                    seen.push(dev.clone());
+                    devices.push((Self::describe_device(&dev), dev));
+                }
+            }
+        }
+        devices
+    }
+
+    /// Human-readable label for a `hw:C,D` device (e.g. `hw:0,3 · HD-Audio`).
+    fn describe_device(dev: &str) -> String {
+        if let Some((card_part, _)) = dev.split_once(',') {
+            if let Ok(name) = CString::new(card_part)
+                && let Ok(card) = Card::from_str(&name)
+            {
+                return format!("{dev} · {}", card.get_name().unwrap_or_default());
+            }
+        }
+        dev.to_string()
+    }
+
     /// Open the hardware device configured for the file's native rate and the
     /// first supported output container.
     pub fn open_pcm(&self, file: &FileAudio) -> Result<(PCM, NativeFormat), BackendError> {

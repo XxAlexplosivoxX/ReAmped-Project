@@ -31,6 +31,10 @@ pub struct BackendDispatcher {
     samples: SharedSamples,
     inner: Box<dyn AudioBackend>,
 
+    // Currently active backend configuration (for change detection).
+    bit_perfect_enabled: bool,
+    device_name: String,
+
     // Last-known parameters, re-applied if a fallback switch occurs.
     trim_start: AtomicF32,
     trim_end: AtomicF32,
@@ -47,21 +51,24 @@ impl BackendDispatcher {
     pub fn new(samples: SharedSamples) -> Self {
         let cfg = load_config();
 
-        let inner: Box<dyn AudioBackend> = if cfg.bit_perfect_enabled {
-            match Self::build_bit_perfect(&samples, &cfg.bit_perfect_device) {
-                Ok(backend) => backend,
-                Err(e) => {
-                    eprintln!("[Backend] bit-perfect ALSA unavailable ({e}); falling back to CPAL");
-                    Box::new(SymphoniaBackend::new(samples.clone()))
+        let (inner, enabled, device): (Box<dyn AudioBackend>, bool, String) =
+            if cfg.bit_perfect_enabled {
+                match Self::build_bit_perfect(&samples, &cfg.bit_perfect_device) {
+                    Ok(backend) => (backend, true, cfg.bit_perfect_device.trim().to_string()),
+                    Err(e) => {
+                        eprintln!("[Backend] bit-perfect ALSA unavailable ({e}); falling back to CPAL");
+                        (Box::new(SymphoniaBackend::new(samples.clone())), false, String::new())
+                    }
                 }
-            }
-        } else {
-            Box::new(SymphoniaBackend::new(samples.clone()))
-        };
+            } else {
+                (Box::new(SymphoniaBackend::new(samples.clone())), false, String::new())
+            };
 
         Self {
             samples,
             inner,
+            bit_perfect_enabled: enabled,
+            device_name: device,
             trim_start: AtomicF32::new(0.0),
             trim_end: AtomicF32::new(0.0),
             effective_duration: AtomicF32::new(f32::INFINITY),
@@ -71,6 +78,55 @@ impl BackendDispatcher {
             high_gain: AtomicF32::new(1.0),
             width: AtomicF32::new(1.0),
         }
+    }
+
+    /// Reconfigure the output backend on the fly.
+    ///
+    /// Rebuilds the inner backend when `enabled` or `device` differ from the
+    /// currently active configuration. DSP parameters (volume, EQ, expander,
+    /// trim) are carried over to the new backend. Returns `true` when the
+    /// backend was rebuilt (the caller should reload the current track).
+    ///
+    /// If bit-perfect mode cannot be satisfied (no usable device), the
+    /// dispatcher silently keeps / falls back to the CPAL backend.
+    pub fn reconfigure(&mut self, enabled: bool, device: &str) -> bool {
+        let device = device.trim();
+        if self.bit_perfect_enabled == enabled && self.device_name == device {
+            return false;
+        }
+
+        let new_inner: Box<dyn AudioBackend> = if enabled {
+            match Self::build_bit_perfect(&self.samples, device) {
+                Ok(backend) => backend,
+                Err(e) => {
+                    eprintln!("[Backend] bit-perfect ALSA unavailable ({e}); keeping CPAL");
+                    Box::new(SymphoniaBackend::new(self.samples.clone()))
+                }
+            }
+        } else {
+            Box::new(SymphoniaBackend::new(self.samples.clone()))
+        };
+
+        self.inner.stop();
+        let mut new_inner = new_inner;
+        new_inner.set_volume(self.volume.load(std::sync::atomic::Ordering::Relaxed));
+        new_inner.low_gain(self.low_gain.load(std::sync::atomic::Ordering::Relaxed));
+        new_inner.mid_gain(self.mid_gain.load(std::sync::atomic::Ordering::Relaxed));
+        new_inner.high_gain(self.high_gain.load(std::sync::atomic::Ordering::Relaxed));
+        new_inner.set_expander_width(self.width.load(std::sync::atomic::Ordering::Relaxed));
+        new_inner.set_trim(
+            self.trim_start.load(std::sync::atomic::Ordering::Relaxed),
+            self.trim_end.load(std::sync::atomic::Ordering::Relaxed),
+            self.effective_duration.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        self.inner = new_inner;
+        self.bit_perfect_enabled = enabled;
+        self.device_name = device.to_string();
+        eprintln!(
+            "[Backend] switched to {} backend",
+            if self.bit_perfect_enabled { "bit-perfect ALSA" } else { "CPAL" }
+        );
+        true
     }
 
     /// Build the bit-perfect backend, probing the hardware for a usable
