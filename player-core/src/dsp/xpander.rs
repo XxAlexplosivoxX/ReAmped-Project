@@ -44,7 +44,7 @@ impl Expander {
         let mut new_right = mid - new_side;
 
         // Simple automatic gain compensation
-        let gain_reducer = 1.0 / (1.0 + (self.width - 1.0).max(0.0) * 0.5);
+        let gain_reducer = 1.0 / (1.0 + (self.width - 1.0).max(0.0) * 0.1);
         new_left *= gain_reducer;
         new_right *= gain_reducer;
 
