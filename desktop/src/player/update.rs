@@ -40,7 +40,9 @@ impl eframe::App for PlayerApp {
         let _surface_rgb = self.palette.surface;
         let on_surface_rgb = self.palette.on_surface;
         let primary_rgb = self.palette.primary;
+        let secondary_rgb = self.palette.on_secondary;
         let on_primary = self.palette.on_primary;
+        let on_primary_cont = self.palette.on_primary_container;
         
         let accent = Color32::from_rgba_unmultiplied_const(primary_rgb[0], primary_rgb[1], primary_rgb[2], 100);
         let text = Color32::from_rgb(on_surface_rgb[0], on_surface_rgb[1], on_surface_rgb[2]);
@@ -51,12 +53,12 @@ impl eframe::App for PlayerApp {
             (v as i32 + s).clamp(0, 255) as u8
         };
 
-        let bg_top = Color32::from_rgb(
-            shift(primary_rgb[0]),
-            shift(primary_rgb[1]),
-            shift(primary_rgb[2]),
+        let bg_bot = Color32::from_rgb(
+            shift(on_primary_cont[0]),
+            shift(on_primary_cont[1]),
+            shift(on_primary_cont[2]),
         ).gamma_multiply(0.8);
-        let bg_bot = Color32::from_rgb(on_primary[0], on_primary[1], on_primary[2]).gamma_multiply(0.8);
+        let bg_top = Color32::from_rgb(secondary_rgb[0], secondary_rgb[1], secondary_rgb[2]).gamma_multiply(0.8);
         let wave_col = Color32::from_rgb(primary_rgb[0], primary_rgb[1], primary_rgb[2]).gamma_multiply(0.7);
 
         self.apply_pending_cover(&ctx);

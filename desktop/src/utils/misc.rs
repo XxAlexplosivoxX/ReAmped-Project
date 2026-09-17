@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use egui::Color32;
@@ -83,61 +84,124 @@ fn argb_to_rgb(argb: u32) -> [u8; 3] {
     ]
 }
 
-/// Extract the dominant colour from raw RGB pixels using chroma-weighted
-/// centroid averaging.  Pixels with higher saturation (chroma ≈ max-min)
-/// contribute more to the result, so colourful elements are favoured over
-/// large neutral areas (shadows, text, borders).
-fn dominant_argb(pixels: &[u8]) -> u32 {
-    let mut total_weight = 0.0f64;
-    let mut r_sum = 0.0f64;
-    let mut g_sum = 0.0f64;
-    let mut b_sum = 0.0f64;
+/// Extract up to `max` visually distinct dominant colours from raw RGB
+/// pixels.
+///
+/// Pixels are accumulated into a 4-bit-per-channel histogram weighted by
+/// chroma² (colourful regions outweigh neutrals), buckets are ranked by
+/// accumulated weight, and colours are greedily accepted while they differ
+/// enough from every colour already chosen.  Returning fewer than `max`
+/// colours means the artwork does not contain that many distinct ones;
+/// callers derive variants from the leading colour in that case.
+fn dominant_colors(pixels: &[u8], max: usize) -> Vec<u32> {
+    let mut buckets: HashMap<u16, (f64, f64, f64, f64)> = HashMap::new();
 
-    for chunk in pixels.chunks(3) {
-        if chunk.len() < 3 {
-            break;
-        }
-        let r = chunk[0] as f64;
-        let g = chunk[1] as f64;
-        let b = chunk[2] as f64;
+    for chunk in pixels.chunks_exact(3) {
+        let (r, g, b) = (chunk[0] as f64, chunk[1] as f64, chunk[2] as f64);
 
-        let max = r.max(g).max(b);
-        let min = r.min(g).min(b);
-        let chroma = max - min;
+        let chroma = r.max(g).max(b) - r.min(g).min(b);
 
         // Weight by chroma² so colourful pixels dominate the average
         let weight = chroma * chroma + 1.0;
 
-        r_sum += r * weight;
-        g_sum += g * weight;
-        b_sum += b * weight;
-        total_weight += weight;
+        let key = ((chunk[0] >> 4) as u16) << 8
+            | ((chunk[1] >> 4) as u16) << 4
+            | (chunk[2] >> 4) as u16;
+        let entry = buckets.entry(key).or_insert((0.0, 0.0, 0.0, 0.0));
+        entry.0 += weight;
+        entry.1 += r * weight;
+        entry.2 += g * weight;
+        entry.3 += b * weight;
     }
 
-    if total_weight == 0.0 {
-        return 0xFF000000;
+    let mut ranked: Vec<(f64, u32)> = buckets
+        .into_iter()
+        .map(|(_, (w, r, g, b))| {
+            let argb = 0xFF000000
+                | ((r / w).round() as u32) << 16
+                | ((g / w).round() as u32) << 8
+                | (b / w).round() as u32;
+            (w, argb)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut chosen: Vec<Hct> = Vec::with_capacity(max);
+    let mut result = Vec::with_capacity(max);
+    for (_, argb) in ranked {
+        if result.len() == max {
+            break;
+        }
+        let hct = Hct::from_int(argb);
+        if chosen.iter().all(|c| colors_are_distinct(c, &hct)) {
+            chosen.push(hct);
+            result.push(argb);
+        }
     }
+    result
+}
 
-    let r = (r_sum / total_weight).round() as u8;
-    let g = (g_sum / total_weight).round() as u8;
-    let b = (b_sum / total_weight).round() as u8;
-
-    0xFF000000 | (r as u32) << 16 | (g as u32) << 8 | b as u32
+/// Whether two colours are far enough apart in HCT space to count as
+/// separate dominant colours (distinct hue, or clearly different chroma and
+/// tone for near-neutral artwork).
+fn colors_are_distinct(a: &Hct, b: &Hct) -> bool {
+    let d = (a.hue() - b.hue()).abs() % 360.0;
+    let hue_diff = d.min(360.0 - d);
+    hue_diff > 25.0
+        || ((a.chroma() - b.chroma()).abs() > 15.0 && (a.tone() - b.tone()).abs() > 20.0)
 }
 
 /// Generate a full Material Design 3 palette (dark scheme, TonalSpot variant)
-/// from a source ARGB colour using the Matugen engine.
-fn generate_m3_palette(source_argb: u32) -> M3Palette {
+/// from the dominant colours of an image using the Matugen engine.
+///
+/// `colors` holds up to three distinct dominant colours ordered by
+/// significance.  The primary always comes from the first one; when the
+/// artwork yielded further distinct colours, the secondary and tertiary
+/// palettes take those colours' own hue and chroma.  When it did not, the
+/// missing palettes are synthesised as visibly lighter / darker variants of
+/// the primary — same hue, reduced chroma, shifted role tone — instead of
+/// rotating the hue.
+fn generate_m3_palette(colors: &[u32]) -> M3Palette {
+    let source_argb = colors.first().copied().unwrap_or(0xFF000000);
     let hct = Hct::from_int(source_argb);
     let hue = hct.hue();
     let chroma = hct.chroma().max(24.0);
 
     let primary = TonalPalette::from_hue_and_chroma(hue, chroma);
-    let secondary = TonalPalette::from_hue_and_chroma((hue + 15.0) % 360.0, 16.0);
-    let tertiary = TonalPalette::from_hue_and_chroma((hue + 60.0) % 360.0, 24.0);
+
+    // Real dominant colours keep their own hue; each match also carries an
+    // optional `(role_tone, on_tone)` override used when the role had to be
+    // synthesised as a variant of the primary because the image lacked a
+    // distinct colour for it.
+    let (secondary, secondary_override) = match colors.get(1).map(|&argb| Hct::from_int(argb)) {
+        Some(src) => (
+            TonalPalette::from_hue_and_chroma(src.hue(), src.chroma().max(16.0)),
+            None,
+        ),
+        None => (
+            TonalPalette::from_hue_and_chroma(hue, (chroma * 0.5).clamp(6.0, 16.0)),
+            Some((90.0, 10.0)),
+        ),
+    };
+    let (tertiary, tertiary_override) = match colors.get(2).map(|&argb| Hct::from_int(argb)) {
+        Some(src) => (
+            TonalPalette::from_hue_and_chroma(src.hue(), src.chroma().max(24.0)),
+            None,
+        ),
+        None => (
+            TonalPalette::from_hue_and_chroma(hue, (chroma * 0.75).clamp(20.0, 42.0)),
+            Some((60.0, 100.0)),
+        ),
+    };
+
     let neutral = TonalPalette::from_hue_and_chroma(hue, 4.0);
     let neutral_variant = TonalPalette::from_hue_and_chroma(hue, 8.0);
     let error = TonalPalette::from_hue_and_chroma(25.0, 84.0);
+
+    // The builder consumes the palettes, so grab the hue/chroma needed for
+    // the variant overrides up front.
+    let secondary_hct = (secondary.hue(), secondary.chroma());
+    let tertiary_hct = (tertiary.hue(), tertiary.chroma());
 
     let scheme = DynamicSchemeBuilder::default()
         .source_color_hct(hct)
@@ -152,7 +216,7 @@ fn generate_m3_palette(source_argb: u32) -> M3Palette {
         .error_palette(error)
         .build();
 
-    M3Palette {
+    let mut palette = M3Palette {
         primary: argb_to_rgb(scheme.primary()),
         on_primary: argb_to_rgb(scheme.on_primary()),
         primary_container: argb_to_rgb(scheme.primary_container()),
@@ -177,13 +241,29 @@ fn generate_m3_palette(source_argb: u32) -> M3Palette {
         outline_variant: argb_to_rgb(scheme.outline_variant()),
         background: argb_to_rgb(scheme.background()),
         on_background: argb_to_rgb(scheme.on_background()),
+    };
+
+    // Pin the synthesised roles to explicitly lighter / darker tones (with
+    // matching readable on-colours) so they read clearly as variants of the
+    // primary instead of near-duplicates of it.
+    if let Some((role_tone, on_tone)) = secondary_override {
+        let (h, c) = secondary_hct;
+        palette.secondary = argb_to_rgb(Hct::from(h, c, role_tone).to_int());
+        palette.on_secondary = argb_to_rgb(Hct::from(h, c, on_tone).to_int());
     }
+    if let Some((role_tone, on_tone)) = tertiary_override {
+        let (h, c) = tertiary_hct;
+        palette.tertiary = argb_to_rgb(Hct::from(h, c, role_tone).to_int());
+        palette.on_tertiary = argb_to_rgb(Hct::from(h, c, on_tone).to_int());
+    }
+
+    palette
 }
 
 /// Extract a full M3 colour palette from cover art using Matugen.
 ///
-/// Decodes the cover image, downsamples it, finds the dominant colour,
-/// and feeds it to the Material You dynamic colour engine to produce
+/// Decodes the cover image and finds its three most distinct dominant
+/// colours, which feed the Material You dynamic colour engine to produce
 /// a complete set of semantic colour roles.
 /// Try to find a folder image (`folder.jpg`, `cover.jpg`, etc.) next to the
 /// audio file.  Returns the raw image bytes when found.
@@ -208,12 +288,12 @@ pub fn extract_palette(cover: CoverArt) -> M3Palette {
     let img = image::load_from_memory(&cover.data)
         .expect("Failed to decode cover image");
 
-    // let small = img.resize(512, 512, image::imageops::FilterType::Nearest);
-    let rgb = img.to_rgb8();
+    let small = img.resize(512, 512, image::imageops::FilterType::Nearest);
+    let rgb = small.to_rgb8();
     let pixels = rgb.as_raw();
 
-    let source = dominant_argb(pixels);
-    generate_m3_palette(source)
+    let source = dominant_colors(pixels, 3);
+    generate_m3_palette(&source)
 }
 
 /// Extract M3 palette from raw image bytes (used for wallpapers).
@@ -222,8 +302,8 @@ pub fn extract_palette_from_bytes(data: &[u8]) -> Option<M3Palette> {
     let small = img.resize(512, 512, image::imageops::FilterType::Nearest);
     let rgb = small.to_rgb8();
     let pixels = rgb.as_raw();
-    let source = dominant_argb(pixels);
-    Some(generate_m3_palette(source))
+    let sources = dominant_colors(pixels, 3);
+    Some(generate_m3_palette(&sources))
 }
 
 /// Get the current system wallpaper as raw image bytes.
@@ -751,3 +831,4 @@ pub fn _draw_meter(ui: &mut egui::Ui, value: f32, bg: Color32, fg: Color32) {
     painter.rect_filled(rect, 2.0, bg);
     painter.rect_filled(fill, 2.0, fg);
 }
+
