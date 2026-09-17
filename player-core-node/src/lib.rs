@@ -72,6 +72,7 @@ pub struct JsTrack {
     pub title: String,
     /// Artist name from metadata tags.
     pub artist: String,
+    pub album: String,
     /// Duration in seconds.
     pub duration: f64,
 }
@@ -82,6 +83,7 @@ impl From<player_core::Track> for JsTrack {
             path: t.path.to_string_lossy().to_string(),
             title: t.title,
             artist: t.artist,
+            album: t.album,
             duration: t.duration as f64,
         }
     }
@@ -95,6 +97,7 @@ pub struct JsMetadata {
     pub title: String,
     /// Artist name.
     pub artist: String,
+    pub album: String,
     /// Duration in seconds.
     pub duration: f64,
     /// Raw cover art bytes (JPEG or PNG).
@@ -253,6 +256,7 @@ impl JsPlayer {
                             path,
                             title: m.title,
                             artist: m.artist,
+                            album: m.album,
                             duration: m.duration,
                         }
                     })
@@ -285,6 +289,7 @@ impl JsPlayer {
                             path,
                             title: m.title,
                             artist: m.artist,
+                            album: m.album,
                             duration: m.duration,
                         }
                     })
@@ -394,6 +399,7 @@ impl JsPlayer {
         self.inner.metadata().map(|m| JsMetadata {
             title: m.title,
             artist: m.artist,
+            album: m.album,
             duration: m.duration as f64,
             cover: m.cover.data,
         })

@@ -3,9 +3,9 @@ use std::path::Path;
 
 use egui::Color32;
 use material_color_utilities::{
+    dynamiccolor::{DynamicSchemeBuilder, Variant},
     hct::Hct,
     palettes::TonalPalette,
-    dynamiccolor::{DynamicSchemeBuilder, Variant},
 };
 use player_core::config::M3Palette;
 use player_core::metadata::CoverArt;
@@ -96,7 +96,7 @@ fn argb_to_rgb(argb: u32) -> [u8; 3] {
 fn dominant_colors(pixels: &[u8], max: usize) -> Vec<u32> {
     let mut buckets: HashMap<u16, (f64, f64, f64, f64)> = HashMap::new();
 
-    for chunk in pixels.chunks_exact(3) {
+    for chunk in pixels.as_chunks::<3>().0 {
         let (r, g, b) = (chunk[0] as f64, chunk[1] as f64, chunk[2] as f64);
 
         let chroma = r.max(g).max(b) - r.min(g).min(b);
@@ -104,9 +104,8 @@ fn dominant_colors(pixels: &[u8], max: usize) -> Vec<u32> {
         // Weight by chroma² so colourful pixels dominate the average
         let weight = chroma * chroma + 1.0;
 
-        let key = ((chunk[0] >> 4) as u16) << 8
-            | ((chunk[1] >> 4) as u16) << 4
-            | (chunk[2] >> 4) as u16;
+        let key =
+            ((chunk[0] >> 4) as u16) << 8 | ((chunk[1] >> 4) as u16) << 4 | (chunk[2] >> 4) as u16;
         let entry = buckets.entry(key).or_insert((0.0, 0.0, 0.0, 0.0));
         entry.0 += weight;
         entry.1 += r * weight;
@@ -270,23 +269,31 @@ fn generate_m3_palette(colors: &[u32]) -> M3Palette {
 pub fn find_folder_cover(track_path: &Path) -> Option<Vec<u8>> {
     let parent = track_path.parent()?;
     for name in &[
-        "folder.jpg", "Folder.jpg", "cover.jpg", "Cover.jpg",
-        "front.jpg", "Front.jpg", "album.jpg", "Album.jpg",
-        "folder.png", "Folder.png", "cover.png", "Cover.png",
+        "folder.jpg",
+        "Folder.jpg",
+        "cover.jpg",
+        "Cover.jpg",
+        "front.jpg",
+        "Front.jpg",
+        "album.jpg",
+        "Album.jpg",
+        "folder.png",
+        "Folder.png",
+        "cover.png",
+        "Cover.png",
     ] {
         let path = parent.join(name);
-        if let Ok(data) = std::fs::read(&path) {
-            if data.len() > 100 {
-                return Some(data);
-            }
+        if let Ok(data) = std::fs::read(&path)
+            && data.len() > 100
+        {
+            return Some(data);
         }
     }
     None
 }
 
 pub fn extract_palette(cover: CoverArt) -> M3Palette {
-    let img = image::load_from_memory(&cover.data)
-        .expect("Failed to decode cover image");
+    let img = image::load_from_memory(&cover.data).expect("Failed to decode cover image");
 
     let small = img.resize(512, 512, image::imageops::FilterType::Nearest);
     let rgb = small.to_rgb8();
@@ -335,9 +342,7 @@ fn get_wallpaper_linux() -> Option<Vec<u8>> {
 
     // 2. Try Hyprland via swww query (most popular animated wallpaper daemon)
     //    Output format: "Monitor eDP-1 (2560x1600): /path/to/wallpaper.jpg"
-    if let Ok(out) = std::process::Command::new("swww")
-        .args(["query"])
-        .output()
+    if let Ok(out) = std::process::Command::new("swww").args(["query"]).output()
         && out.status.success()
     {
         let s = String::from_utf8_lossy(&out.stdout);
@@ -660,13 +665,18 @@ fn is_video_path(path: &Path) -> bool {
 fn frame_from_video(path: &Path) -> Option<Vec<u8>> {
     let out = std::process::Command::new("ffmpeg")
         .args([
-            "-v", "error",
-            "-ss", "1", // skip a second in case the intro frame is blank
+            "-v",
+            "error",
+            "-ss",
+            "1", // skip a second in case the intro frame is blank
             "-i",
             path.to_str()?,
-            "-frames:v", "1",
-            "-f", "image2pipe",
-            "-vcodec", "png",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
             "-",
         ])
         .output()
@@ -831,4 +841,3 @@ pub fn _draw_meter(ui: &mut egui::Ui, value: f32, bg: Color32, fg: Color32) {
     painter.rect_filled(rect, 2.0, bg);
     painter.rect_filled(fill, 2.0, fg);
 }
-

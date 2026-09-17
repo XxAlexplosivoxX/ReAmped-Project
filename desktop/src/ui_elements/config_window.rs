@@ -1,28 +1,54 @@
 use egui::{Color32, Context};
-use player_core::config::{save_config, M3Palette, ThemeSource};
+use player_core::config::{M3Palette, ThemeSource, save_config};
 
-use crate::{ui_elements::music_dirs::draw_music_dirs, player::player_app_init::PlayerApp};
+use crate::{player::player_app_init::PlayerApp, ui_elements::music_dirs::draw_music_dirs};
 
 macro_rules! m3_role {
     ($name:expr, $get:ident, $get_mut:ident) => {
-        ($name, |p: &M3Palette| &p.$get, |p: &mut M3Palette| &mut p.$get_mut)
+        (
+            $name,
+            |p: &M3Palette| &p.$get,
+            |p: &mut M3Palette| &mut p.$get_mut,
+        )
     };
 }
 
+type M3Role = (
+    &'static str,
+    fn(&M3Palette) -> &[u8; 3],
+    fn(&mut M3Palette) -> &mut [u8; 3],
+);
+
 /// All M3 colour roles in display order.
-const M3_ROLES: &[(&str, fn(&M3Palette) -> &[u8; 3], fn(&mut M3Palette) -> &mut [u8; 3])] = &[
+const M3_ROLES: &[M3Role] = &[
     m3_role!("Primary", primary, primary),
     m3_role!("On-Primary", on_primary, on_primary),
     m3_role!("Primary Container", primary_container, primary_container),
-    m3_role!("On-Primary Container", on_primary_container, on_primary_container),
+    m3_role!(
+        "On-Primary Container",
+        on_primary_container,
+        on_primary_container
+    ),
     m3_role!("Secondary", secondary, secondary),
     m3_role!("On-Secondary", on_secondary, on_secondary),
-    m3_role!("Secondary Container", secondary_container, secondary_container),
-    m3_role!("On-Secondary Container", on_secondary_container, on_secondary_container),
+    m3_role!(
+        "Secondary Container",
+        secondary_container,
+        secondary_container
+    ),
+    m3_role!(
+        "On-Secondary Container",
+        on_secondary_container,
+        on_secondary_container
+    ),
     m3_role!("Tertiary", tertiary, tertiary),
     m3_role!("On-Tertiary", on_tertiary, on_tertiary),
     m3_role!("Tertiary Container", tertiary_container, tertiary_container),
-    m3_role!("On-Tertiary Container", on_tertiary_container, on_tertiary_container),
+    m3_role!(
+        "On-Tertiary Container",
+        on_tertiary_container,
+        on_tertiary_container
+    ),
     m3_role!("Error", error, error),
     m3_role!("On-Error", on_error, on_error),
     m3_role!("Error Container", error_container, error_container),
@@ -132,9 +158,21 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             // Theme source selector
                             let prev_source = cfg.theme.source.clone();
                             ui.label("Fuente de la paleta de colores:");
-                            ui.radio_value(&mut cfg.theme.source, ThemeSource::AlbumCover, "Portada del tema (AlbumCover)");
-                            ui.radio_value(&mut cfg.theme.source, ThemeSource::SystemWallpaper, "Fondo de pantalla (SystemWallpaper)");
-                            ui.radio_value(&mut cfg.theme.source, ThemeSource::Manual, "Ajuste manual (Manual)");
+                            ui.radio_value(
+                                &mut cfg.theme.source,
+                                ThemeSource::AlbumCover,
+                                "Portada del tema (AlbumCover)",
+                            );
+                            ui.radio_value(
+                                &mut cfg.theme.source,
+                                ThemeSource::SystemWallpaper,
+                                "Fondo de pantalla (SystemWallpaper)",
+                            );
+                            ui.radio_value(
+                                &mut cfg.theme.source,
+                                ThemeSource::Manual,
+                                "Ajuste manual (Manual)",
+                            );
 
                             if cfg.theme.source != prev_source {
                                 save_config(&cfg);
@@ -196,10 +234,10 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             if ui.checkbox(&mut cfg.spectrum_smooth, "Suavizado").changed() {
                                 save_config(&cfg);
                             }
-                            if !cfg.old_style {
-                                if ui.checkbox(&mut cfg.line_mode, "Line mode").changed() {
-                                    save_config(&cfg);
-                                }
+                            if !cfg.old_style
+                                && ui.checkbox(&mut cfg.line_mode, "Line mode").changed()
+                            {
+                                save_config(&cfg);
                             }
                             if ui.checkbox(&mut cfg.old_style, "Old style").changed() {
                                 if cfg.old_style {
@@ -226,27 +264,32 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             ui.separator();
 
                             if ui
-                                .checkbox(&mut cfg.crossfade_enabled, "Transición suave (crossfade)")
+                                .checkbox(
+                                    &mut cfg.crossfade_enabled,
+                                    "Transición suave (crossfade)",
+                                )
                                 .changed()
                             {
                                 save_config(&cfg);
                             }
 
-                            if cfg.crossfade_enabled {
-                                if ui
+                            if cfg.crossfade_enabled
+                                && ui
                                     .add(
                                         egui::Slider::new(&mut cfg.crossfade_seconds, 1.0..=30.0)
                                             .step_by(0.5)
                                             .text("Duración (segundos)"),
                                     )
                                     .drag_stopped()
-                                {
-                                    save_config(&cfg);
-                                }
+                            {
+                                save_config(&cfg);
                             }
 
                             if ui
-                                .checkbox(&mut cfg.silence_trim_enabled, "Recortar silencio inicial/final")
+                                .checkbox(
+                                    &mut cfg.silence_trim_enabled,
+                                    "Recortar silencio inicial/final",
+                                )
                                 .changed()
                             {
                                 save_config(&cfg);
@@ -286,13 +329,15 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
 
                             for (key, key_label) in &all_keys {
                                 let current_key = key.to_string();
-                                let current_cmd = cfg.keybindings.bindings.get(&current_key).cloned();
-                                let current_text = current_cmd.as_deref().map_or("—".to_string(), |c| {
-                                    all_commands
-                                        .iter()
-                                        .find(|(k, _)| *k == c)
-                                        .map_or(c.to_string(), |(_, l)| l.to_string())
-                                });
+                                let current_cmd =
+                                    cfg.keybindings.bindings.get(&current_key).cloned();
+                                let current_text =
+                                    current_cmd.as_deref().map_or("—".to_string(), |c| {
+                                        all_commands
+                                            .iter()
+                                            .find(|(k, _)| *k == c)
+                                            .map_or(c.to_string(), |(_, l)| l.to_string())
+                                    });
 
                                 ui.horizontal(|ui| {
                                     ui.label(format!("{:<12}", *key_label));
@@ -303,20 +348,24 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                                             let is_none = current_cmd.is_none();
                                             if ui
                                                 .selectable_label(is_none, "— Sin asignar —")
-                                                .clicked() && !is_none
+                                                .clicked()
+                                                && !is_none
                                             {
                                                 cfg.keybindings.bindings.remove(&current_key);
                                                 kb_changed = true;
                                             }
                                             for (cmd, cmd_label) in all_commands {
-                                                let is_selected = current_cmd.as_deref() == Some(cmd);
+                                                let is_selected =
+                                                    current_cmd.as_deref() == Some(cmd);
                                                 if ui
                                                     .selectable_label(is_selected, *cmd_label)
-                                                    .clicked() && !is_selected
+                                                    .clicked()
+                                                    && !is_selected
                                                 {
-                                                    cfg.keybindings
-                                                        .bindings
-                                                        .insert(current_key.clone(), cmd.to_string());
+                                                    cfg.keybindings.bindings.insert(
+                                                        current_key.clone(),
+                                                        cmd.to_string(),
+                                                    );
                                                     kb_changed = true;
                                                 }
                                             }
@@ -341,7 +390,7 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                         }
 
                         if reload_cover {
-                            player.ensure_cover_loaded(&ctx, true);
+                            player.ensure_cover_loaded(ctx, true);
                         }
 
                         if reload_library {

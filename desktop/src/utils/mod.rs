@@ -1,9 +1,9 @@
-pub mod truncate;
-pub mod marquee_text;
 pub mod background;
-pub mod visualizer;
-pub mod scan_music_dirs;
-pub mod media_controls;
-pub mod misc;
 pub mod cache;
 pub mod keyboard;
+pub mod marquee_text;
+pub mod media_controls;
+pub mod misc;
+pub mod scan_music_dirs;
+pub mod truncate;
+pub mod visualizer;

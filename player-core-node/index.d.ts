@@ -231,6 +231,7 @@ export interface JsTrack {
   title: string;
   /** Artist name from metadata tags. */
   artist: string;
+  album: string;
   /** Duration in seconds. */
   duration: number;
 }
@@ -241,6 +242,7 @@ export interface JsMetadata {
   title: string;
   /** Artist name. */
   artist: string;
+  album: string;
   /** Duration in seconds. */
   duration: number;
   /** Raw cover art bytes (JPEG or PNG). */

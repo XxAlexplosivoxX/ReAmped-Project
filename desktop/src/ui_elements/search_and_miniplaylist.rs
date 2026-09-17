@@ -1,7 +1,10 @@
-use crate::{PlayerApp, ui_elements::mini_playlist::mini_playlist};
-use player_core::{Track, PlayerCommand};
+use crate::{
+    PlayerApp,
+    ui_elements::mini_playlist::{MiniPlaylistPlayback, mini_playlist},
+};
 use egui::{Color32, RichText, TextEdit, Ui};
-use std::{time::Duration, thread::sleep};
+use player_core::{PlayerCommand, Track};
+use std::{thread::sleep, time::Duration};
 
 pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp) {
     if ui
@@ -14,7 +17,11 @@ pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp) {
                         .hint_text(
                             RichText::new("type here to search...")
                                 .color(
-                                    Color32::from_rgb(p.on_surface[0], p.on_surface[1], p.on_surface[2])
+                                    Color32::from_rgb(
+                                        p.on_surface[0],
+                                        p.on_surface[1],
+                                        p.on_surface[2],
+                                    )
                                     .linear_multiply(0.5),
                                 )
                                 .italics(),
@@ -37,12 +44,18 @@ pub fn show_search_and_miniplaylist(ui: &mut Ui, player: &mut PlayerApp) {
             mini_playlist(
                 ui,
                 &playlist,
-                player.current_track(),
-                player.player.is_playing(),
+                MiniPlaylistPlayback {
+                    current: player.current_track(),
+                    playing: player.player.is_playing(),
+                    pos: player.position,
+                    just_executed: player.just_executed,
+                },
                 &player.palette,
-                |track: &Track| player.player.send(PlayerCommand::JumpToPath(track.path.clone())),
-                player.position,
-                player.just_executed,
+                |track: &Track| {
+                    player
+                        .player
+                        .send(PlayerCommand::JumpToPath(track.path.clone()))
+                },
                 player.search_str.clone(),
                 &mut player.scroll_current_track,
             );

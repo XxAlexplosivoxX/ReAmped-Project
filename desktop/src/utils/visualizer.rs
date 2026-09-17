@@ -11,6 +11,15 @@ use player_core::viz::waveform::OscilloscopeFrame;
 
 use crate::dsp_ui::db_meter::calculate_db;
 
+struct SpectrumHoverCtx<'a> {
+    rect: Rect,
+    raw: &'a [f32],
+    fft_size: usize,
+    sample_rate: f32,
+    response: egui::Response,
+    text_color: Color32,
+}
+
 #[derive(Clone, Debug)]
 pub struct SpectrumVisualizer {
     state: SpectrumState,
@@ -95,8 +104,13 @@ impl SpectrumVisualizer {
             };
         }
 
-        let base_color = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
-        let peak_color = Color32::from_rgb(palette.on_primary_container[0], palette.on_primary_container[1], palette.on_primary_container[2]);
+        let base_color =
+            Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
+        let peak_color = Color32::from_rgb(
+            palette.on_primary_container[0],
+            palette.on_primary_container[1],
+            palette.on_primary_container[2],
+        );
         let raw = spectrum(samples.clone(), fft_size);
         let target_db = calculate_db(&raw);
         self.loudness = egui::lerp(self.loudness..=target_db, 0.2);
@@ -110,8 +124,14 @@ impl SpectrumVisualizer {
         painter.rect_filled(rect, 6.0, bg);
 
         if old_style {
-            let mut bands =
-                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
+            let mut bands = log_frequency_bands(
+                &raw,
+                bands_quantity,
+                44100.0,
+                fft_size,
+                SPECTRUM_F_MIN,
+                SPECTRUM_F_MAX,
+            );
 
             if smooth_enabled {
                 bands = smooth_spatial(&bands);
@@ -166,8 +186,14 @@ impl SpectrumVisualizer {
                 ));
             }
         } else {
-            let mut bands =
-                log_frequency_bands(&raw, bands_quantity, 44100.0, fft_size, SPECTRUM_F_MIN, SPECTRUM_F_MAX);
+            let mut bands = log_frequency_bands(
+                &raw,
+                bands_quantity,
+                44100.0,
+                fft_size,
+                SPECTRUM_F_MIN,
+                SPECTRUM_F_MAX,
+            );
 
             if smooth_enabled {
                 bands = smooth_spatial(&bands);
@@ -292,7 +318,7 @@ impl SpectrumVisualizer {
             let x = rect.left() + t * rect.width();
             painter.line_segment(
                 [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(1.0, self.tooltip.grid_line),
+                Stroke::new(1.0_f32, self.tooltip.grid_line),
             );
             painter.text(
                 Pos2::new(x - 4.0, rect.top() + 2.0),
@@ -304,21 +330,35 @@ impl SpectrumVisualizer {
         }
 
         if response.hovered() {
-            let text_col = Color32::from_rgb(palette.on_primary[0], palette.on_primary[1], palette.on_primary[2]);
-            self.draw_spectrum_hover(&painter, rect, &raw, fft_size, sample_rate, response, text_col);
+            let text_col = Color32::from_rgb(
+                palette.on_primary[0],
+                palette.on_primary[1],
+                palette.on_primary[2],
+            );
+            self.draw_spectrum_hover(
+                &painter,
+                SpectrumHoverCtx {
+                    rect,
+                    raw: &raw,
+                    fft_size,
+                    sample_rate,
+                    response,
+                    text_color: text_col,
+                },
+            );
         }
     }
 
-    fn draw_spectrum_hover(
-        &self,
-        painter: &Painter,
-        rect: Rect,
-        raw: &[f32],
-        fft_size: usize,
-        sample_rate: f32,
-        response: egui::Response,
-        text_color: Color32,
-    ) {
+    fn draw_spectrum_hover(&self, painter: &Painter, hover: SpectrumHoverCtx<'_>) {
+        let SpectrumHoverCtx {
+            rect,
+            raw,
+            fft_size,
+            sample_rate,
+            response,
+            text_color,
+        } = hover;
+
         let cursor_pos = match response.hover_pos() {
             Some(p) if rect.contains(p) => p,
             _ => return,
@@ -329,7 +369,7 @@ impl SpectrumVisualizer {
                 Pos2::new(cursor_pos.x, rect.top()),
                 Pos2::new(cursor_pos.x, rect.bottom()),
             ],
-            Stroke::new(1.0, self.tooltip.cursor),
+            Stroke::new(1.0_f32, self.tooltip.cursor),
         );
 
         let t = ((cursor_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -362,13 +402,7 @@ impl SpectrumVisualizer {
             _ => px,
         };
 
-        painter.text(
-            Pos2::new(px, py),
-            align,
-            &text,
-            font,
-            text_color,
-        );
+        painter.text(Pos2::new(px, py), align, &text, font, text_color);
     }
 
     pub fn draw_beat_stripes(&mut self, ui: &mut egui::Ui, color_1: Color32, color_2: Color32) {
@@ -446,18 +480,19 @@ fn hash_palette(palette: &M3Palette) -> u64 {
             h = h.wrapping_mul(31).wrapping_add(palette.$field[2] as u64);
         };
     }
-    mix!(primary); mix!(secondary); mix!(tertiary);
-    mix!(surface); mix!(on_surface); mix!(surface_variant);
-    mix!(background); mix!(outline);
+    mix!(primary);
+    mix!(secondary);
+    mix!(tertiary);
+    mix!(surface);
+    mix!(on_surface);
+    mix!(surface_variant);
+    mix!(background);
+    mix!(outline);
     h
 }
 
 pub fn energy_all_freq(spectrum: &[f32]) -> f32 {
-    let mut energy = 0.0;
-
-    for i in 0..spectrum.len() {
-        energy += spectrum[i];
-    }
+    let energy: f32 = spectrum.iter().sum();
 
     (energy / spectrum.len() as f32) * 2.5
 }
@@ -546,7 +581,7 @@ pub fn draw_waveform_raw(
         points.push(Pos2::new(x, y));
     }
 
-    painter.add(Shape::line(points, Stroke::new(1.2, color)));
+    painter.add(Shape::line(points, Stroke::new(1.2_f32, color)));
 }
 
 const SPECTRUM_F_MIN: f32 = 20.0;
@@ -563,8 +598,9 @@ fn freq_to_note(freq: f32) -> String {
     let note_idx = ((midi_r as i32).rem_euclid(12)) as usize;
     let octave = (midi_r as i32) / 12 - 1;
     let cents = ((midi - midi_r) * 100.0).round() as i32;
-    const NAMES: [&str; 12] =
-        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
     if cents == 0 {
         format!("{}{}", NAMES[note_idx], octave)
     } else {
@@ -606,11 +642,25 @@ pub struct TooltipColors {
 impl TooltipColors {
     pub fn from_palette(palette: &M3Palette) -> Self {
         let accent = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
-        let on_surface = Color32::from_rgb(palette.on_surface[0], palette.on_surface[1], palette.on_surface[2]);
+        let on_surface = Color32::from_rgb(
+            palette.on_surface[0],
+            palette.on_surface[1],
+            palette.on_surface[2],
+        );
 
         Self {
-            grid_line: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 51),
-            grid_text: Color32::from_rgba_unmultiplied(on_surface.r(), on_surface.g(), on_surface.b(), 102),
+            grid_line: Color32::from_rgba_unmultiplied(
+                on_surface.r(),
+                on_surface.g(),
+                on_surface.b(),
+                51,
+            ),
+            grid_text: Color32::from_rgba_unmultiplied(
+                on_surface.r(),
+                on_surface.g(),
+                on_surface.b(),
+                102,
+            ),
             cursor: Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 102),
         }
     }

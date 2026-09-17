@@ -8,16 +8,17 @@
 //! pixels, is not resizable, and honours the fullscreen setting from the
 //! persisted configuration.
 
+mod dsp_ui;
 mod player;
 mod ui_elements;
 mod utils;
-mod dsp_ui;
 
-use std::path::PathBuf;
 use player_core::config::load_config;
+use std::path::PathBuf;
 
 use crate::{
-    player::player_app_init::PlayerApp, utils::{misc::setup_fonts, scan_music_dirs::scan_music_inputs},
+    player::player_app_init::PlayerApp,
+    utils::{misc::setup_fonts, scan_music_dirs::scan_music_inputs},
 };
 
 /// Application entry point.

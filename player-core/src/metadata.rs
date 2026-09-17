@@ -18,6 +18,7 @@ pub struct Metadata {
     pub title: String,
     /// Artist name (falls back to `"Unknown"`).
     pub artist: String,
+    pub album: String,
     /// Duration in seconds (from stream properties).
     pub duration: f32,
     /// Embedded cover art (may be the default placeholder).
@@ -89,6 +90,11 @@ pub fn read_metadata(path: &Path) -> Option<Metadata> {
             .and_then(|t| t.artist())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Unknown".into()),
+
+        album: tag
+            .and_then(|t| t.album())
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
 
         duration,
         cover,

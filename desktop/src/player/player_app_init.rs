@@ -1,19 +1,19 @@
-use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
-use std::time::Duration;
-use std::thread;
-use egui::{Color32, ColorImage};
-use player_core::{
-    Player, PlayerBuilder, PlayerCommand, Track, Options, metadata::CoverArt,
-};
-use player_core::config::{AppConfig, load_config, M3Palette, ThemeSource};
-use player_core::metadata::is_default_cover;
 use crate::utils::{
     media_controls::{MediaControls, MediaSnapshot},
-    misc::{extract_palette, extract_palette_from_bytes, find_folder_cover, get_system_wallpaper_buffer},
-    visualizer::SpectrumVisualizer,
+    misc::{
+        extract_palette, extract_palette_from_bytes, find_folder_cover, get_system_wallpaper_buffer,
+    },
     scan_music_dirs::scan_music_dirs,
+    visualizer::SpectrumVisualizer,
 };
+use egui::{Color32, ColorImage};
+use player_core::config::{AppConfig, M3Palette, ThemeSource, load_config};
+use player_core::metadata::is_default_cover;
+use player_core::{Options, Player, PlayerBuilder, PlayerCommand, Track, metadata::CoverArt};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 pub struct CoverWorkResult {
     pub cover_data: Vec<u8>,
@@ -73,7 +73,9 @@ impl PlayerApp {
         let config_values = load_config();
         let config = Arc::new(Mutex::new(config_values.clone()));
         let visualizer = SpectrumVisualizer::new(config.clone());
-        let player = PlayerBuilder::new().with_volume(config_values.volume).build();
+        let player = PlayerBuilder::new()
+            .with_volume(config_values.volume)
+            .build();
         let media_controls = MediaControls::start(player.clone());
         let default_palette = M3Palette::default();
 
@@ -115,7 +117,8 @@ impl PlayerApp {
         app.player.send(PlayerCommand::SetGainBass(app.bass_val));
         app.player.send(PlayerCommand::SetGainMid(app.mid_val));
         app.player.send(PlayerCommand::SetGainHigh(app.high_val));
-        app.player.send(PlayerCommand::SetExpanderWidth(app.width_val));
+        app.player
+            .send(PlayerCommand::SetExpanderWidth(app.width_val));
 
         app.spawn_media_sync_thread();
         app
@@ -136,14 +139,18 @@ impl PlayerApp {
                     playing: player.is_playing(),
                     playlist_len: playlist.len(),
                     playlist_idx,
+                    position: player.position(),
+                    duration: player.duration(),
+                    volume: player.volume(),
+                    shuffle: player.shuffle(),
+                    repeat: player.repeat(),
+                    repeat_one: player.repeat_one(),
                 });
 
                 thread::sleep(Duration::from_millis(150));
             }
         });
     }
-
-
 
     fn apply_m3_visuals(palette: &M3Palette, ctx: &egui::Context) {
         let mut visuals = egui::Visuals::dark();
@@ -153,16 +160,45 @@ impl PlayerApp {
         visuals.extreme_bg_color = Color32::TRANSPARENT;
         visuals.button_frame = true;
 
-        let _surface = Color32::from_rgb(palette.surface[0], palette.surface[1], palette.surface[2]);
-        let on_surface = Color32::from_rgb(palette.on_surface[0], palette.on_surface[1], palette.on_surface[2]);
+        let _surface =
+            Color32::from_rgb(palette.surface[0], palette.surface[1], palette.surface[2]);
+        let on_surface = Color32::from_rgb(
+            palette.on_surface[0],
+            palette.on_surface[1],
+            palette.on_surface[2],
+        );
         let primary = Color32::from_rgb(palette.primary[0], palette.primary[1], palette.primary[2]);
-        let on_primary = Color32::from_rgb(palette.on_primary[0], palette.on_primary[1], palette.on_primary[2]);
-        let primary_container = Color32::from_rgb(palette.primary_container[0], palette.primary_container[1], palette.primary_container[2]);
-        let on_primary_container = Color32::from_rgb(palette.on_primary_container[0], palette.on_primary_container[1], palette.on_primary_container[2]);
-        let surface_variant = Color32::from_rgb(palette.surface_variant[0], palette.surface_variant[1], palette.surface_variant[2]);
-        let _on_surface_variant = Color32::from_rgb(palette.on_surface_variant[0], palette.on_surface_variant[1], palette.on_surface_variant[2]);
+        let on_primary = Color32::from_rgb(
+            palette.on_primary[0],
+            palette.on_primary[1],
+            palette.on_primary[2],
+        );
+        let primary_container = Color32::from_rgb(
+            palette.primary_container[0],
+            palette.primary_container[1],
+            palette.primary_container[2],
+        );
+        let on_primary_container = Color32::from_rgb(
+            palette.on_primary_container[0],
+            palette.on_primary_container[1],
+            palette.on_primary_container[2],
+        );
+        let surface_variant = Color32::from_rgb(
+            palette.surface_variant[0],
+            palette.surface_variant[1],
+            palette.surface_variant[2],
+        );
+        let _on_surface_variant = Color32::from_rgb(
+            palette.on_surface_variant[0],
+            palette.on_surface_variant[1],
+            palette.on_surface_variant[2],
+        );
         let outline = Color32::from_rgb(palette.outline[0], palette.outline[1], palette.outline[2]);
-        let _secondary = Color32::from_rgb(palette.secondary[0], palette.secondary[1], palette.secondary[2]);
+        let _secondary = Color32::from_rgb(
+            palette.secondary[0],
+            palette.secondary[1],
+            palette.secondary[2],
+        );
 
         visuals.widgets.noninteractive.bg_fill = surface_variant;
         visuals.widgets.noninteractive.fg_stroke.color = on_surface;
@@ -219,26 +255,34 @@ impl PlayerApp {
                     ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba)
                 });
 
-                let src = CoverArt { data: cover_data.clone(), mime: cover_mime };
+                let src = CoverArt {
+                    data: cover_data.clone(),
+                    mime: cover_mime,
+                };
                 let palette = match cfg.theme.source {
                     ThemeSource::AlbumCover => {
-                        let folder = is_default.then(|| {
-                            current_track.as_ref()
-                                .and_then(|p| find_folder_cover(p))
-                                .and_then(|b| extract_palette_from_bytes(&b))
-                        }).flatten();
+                        let folder = is_default
+                            .then(|| {
+                                current_track
+                                    .as_ref()
+                                    .and_then(|p| find_folder_cover(p))
+                                    .and_then(|b| extract_palette_from_bytes(&b))
+                            })
+                            .flatten();
                         folder.unwrap_or_else(|| extract_palette(src))
                     }
-                    ThemeSource::SystemWallpaper => {
-                        get_system_wallpaper_buffer()
-                            .and_then(|b| extract_palette_from_bytes(&b))
-                            .unwrap_or_else(|| extract_palette(src))
-                    }
+                    ThemeSource::SystemWallpaper => get_system_wallpaper_buffer()
+                        .and_then(|b| extract_palette_from_bytes(&b))
+                        .unwrap_or_else(|| extract_palette(src)),
                     ThemeSource::Manual => cfg.theme.palette.clone(),
                 };
 
                 let mut lock = result.lock().unwrap();
-                *lock = Some(CoverWorkResult { cover_data, color_image, palette });
+                *lock = Some(CoverWorkResult {
+                    cover_data,
+                    color_image,
+                    palette,
+                });
             });
         }
     }
@@ -282,7 +326,7 @@ impl PlayerApp {
             let mut tracks = Vec::with_capacity(startup_tracks.len() + library_tracks.len());
             let mut seen_paths = HashSet::new();
 
-            for track in startup_tracks.into_iter().chain(library_tracks.into_iter()) {
+            for track in startup_tracks.into_iter().chain(library_tracks) {
                 if seen_paths.insert(track.path.clone()) {
                     tracks.push(track);
                 }

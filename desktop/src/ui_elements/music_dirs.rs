@@ -20,12 +20,12 @@ pub fn draw_music_dirs(ui: &mut egui::Ui, config: &mut AppConfig) -> bool {
         changed = true;
     }
 
-    if ui.button("➕ Add folder").clicked() {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            config.music_dirs.push(path);
-            save_config(config);
-            changed = true;
-        }
+    if ui.button("➕ Add folder").clicked()
+        && let Some(path) = rfd::FileDialog::new().pick_folder()
+    {
+        config.music_dirs.push(path);
+        save_config(config);
+        changed = true;
     }
 
     changed

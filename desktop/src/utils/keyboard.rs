@@ -42,12 +42,12 @@ pub fn handle_keyboard_input(
                         }
                     }
                 }
-                egui::Event::Text(text) => {
+                egui::Event::Text(text)
                     // Handle single character keys
-                    if text.len() == 1 {
+                    if text.len() == 1 => {
                         let ch = text.chars().next().unwrap();
                         let upper = ch.to_uppercase().to_string();
-                        
+
                         let code = match upper.as_str() {
                             "N" => Some(KeyCode::KeyN),
                             "P" => Some(KeyCode::KeyP),
@@ -69,7 +69,6 @@ pub fn handle_keyboard_input(
                             }
                         }
                     }
-                }
                 _ => {}
             }
         }

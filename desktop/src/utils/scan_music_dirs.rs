@@ -2,14 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::utils::cache::{CacheEntry, TrackCache};
-use player_core::{metadata::read_metadata, Track};
+use player_core::{Track, metadata::read_metadata};
 use walkdir::WalkDir;
 
 const AUDIO_EXTS: &[&str] = &[
-    "mp3", "mpa",
-    "wav", "wave", "aif", "aiff", "aifc",
-    "flac", "ogg", "oga", "vorbis",
-    "mka", "mkv", "webm",
+    "mp3", "mpa", "wav", "wave", "aif", "aiff", "aifc", "flac", "ogg", "oga", "vorbis", "mka",
+    "mkv", "webm",
 ];
 
 fn fallback_track_info(path: &Path) -> (String, String, f32) {
@@ -48,69 +46,72 @@ fn push_track_if_audio(path: &Path, tracks: &mut Vec<Track>, cache: &mut TrackCa
         return;
     }
 
-    if cache.is_valid(path) {
-        if let Some(cached) = cache.get(path) {
-            tracks.push(Track {
-                path: path.to_path_buf(),
-                title: cached.title, 
-                artist: cached.artist,
-                duration: cached.duration,
-            });
-            return;
-        }
+    if cache.is_valid(path)
+        && let Some(cached) = cache.get(path)
+    {
+        tracks.push(Track {
+            path: path.to_path_buf(),
+            title: cached.title,
+            artist: cached.artist,
+            album: cached.album,
+            duration: cached.duration,
+        });
+        return;
     }
 
     let (fallback_title, fallback_artist, fallback_duration) = fallback_track_info(path);
 
     if let Some(metadata) = read_metadata(path) {
-        if let Ok(file_meta) = fs::metadata(path) {
-            if let Ok(modified) = file_meta.modified() {
-                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    let modified_time = duration.as_secs();
-                    let file_size = file_meta.len();
-                    cache.insert(
-                        path.to_path_buf(),
-                        CacheEntry {
-                            title: metadata.title.clone(),
-                            artist: metadata.artist.clone(),
-                            duration: metadata.duration,
-                            modified_time,
-                            file_size,
-                        },
-                    );
-                }
-            }
+        if let Ok(file_meta) = fs::metadata(path)
+            && let Ok(modified) = file_meta.modified()
+            && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            let modified_time = duration.as_secs();
+            let file_size = file_meta.len();
+            cache.insert(
+                path.to_path_buf(),
+                CacheEntry {
+                    title: metadata.title.clone(),
+                    artist: metadata.artist.clone(),
+                    album: metadata.album.clone(),
+                    duration: metadata.duration,
+                    modified_time,
+                    file_size,
+                },
+            );
         }
         tracks.push(Track {
             path: path.to_path_buf(),
             title: metadata.title,
             artist: metadata.artist,
+            album: metadata.album,
             duration: metadata.duration,
         });
     } else {
-        if let Ok(file_meta) = fs::metadata(path) {
-            if let Ok(modified) = file_meta.modified() {
-                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    let modified_time = duration.as_secs();
-                    let file_size = file_meta.len();
-                    cache.insert(
-                        path.to_path_buf(),
-                        CacheEntry {
-                            title: fallback_title.clone(),
-                            artist: fallback_artist.clone(),
-                            duration: fallback_duration,
-                            modified_time,
-                            file_size,
-                        },
-                    );
-                }
-            }
+        if let Ok(file_meta) = fs::metadata(path)
+            && let Ok(modified) = file_meta.modified()
+            && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            let modified_time = duration.as_secs();
+            let file_size = file_meta.len();
+            cache.insert(
+                path.to_path_buf(),
+                CacheEntry {
+                    title: fallback_title.clone(),
+                    artist: fallback_artist.clone(),
+                    album: String::new(),
+                    duration: fallback_duration,
+                    modified_time,
+                    file_size,
+                },
+            );
         }
 
         tracks.push(Track {
             path: path.to_path_buf(),
             title: fallback_title,
             artist: fallback_artist,
+            album: String::new(),
             duration: fallback_duration,
         });
     }
@@ -121,7 +122,11 @@ pub fn scan_music_dirs(dirs: &[PathBuf]) -> Vec<Track> {
     let mut tracks = Vec::new();
 
     for dir in dirs {
-        for entry in WalkDir::new(dir).follow_links(true).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -142,7 +147,11 @@ pub fn scan_music_inputs(paths: &[PathBuf]) -> Vec<Track> {
 
     for path in paths {
         if path.is_dir() {
-            for entry in WalkDir::new(path).follow_links(true).into_iter().filter_map(Result::ok) {
+            for entry in WalkDir::new(path)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
                 if !entry.file_type().is_file() {
                     continue;
                 }

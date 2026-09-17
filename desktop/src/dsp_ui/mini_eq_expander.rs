@@ -13,7 +13,7 @@ pub fn show_eq_controls(ui: &mut Ui, player: &mut PlayerApp, _accent: Color32, t
         ui.spacing_mut().item_spacing = Vec2::new(2.0, 3.0);
         ui.vertical_centered_justified(|ui| {
             egui::Frame::group(ui.style())
-                .stroke(Stroke::new(1.0, text))
+                .stroke(Stroke::new(1.0_f32, text))
                 .inner_margin(egui::Margin::same(0))
                 .show(ui, |ui| {
                     ui.add_space(7.5);
@@ -66,7 +66,13 @@ pub fn show_expander_knob(ui: &mut Ui, player: &mut PlayerApp, color: Color32) {
     }
 }
 
-fn draw_real_knob(ui: &mut Ui, label: &str, value: &mut f32, accent: Color32, on_primary: Color32) -> egui::Response {
+fn draw_real_knob(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    accent: Color32,
+    on_primary: Color32,
+) -> egui::Response {
     // Force a specific width for the knob + label column
     ui.allocate_ui(Vec2::new(20.0, 30.0), |ui| {
         ui.vertical_centered_justified(|ui| {
@@ -103,7 +109,6 @@ fn draw_real_knob(ui: &mut Ui, label: &str, value: &mut f32, accent: Color32, on
                 }
             }
 
-
             if ui.is_rect_visible(rect) {
                 let center = rect.center();
                 let radius = rect.width() / 2.0;
@@ -114,7 +119,8 @@ fn draw_real_knob(ui: &mut Ui, label: &str, value: &mut f32, accent: Color32, on
                     on_primary
                 };
                 ui.painter().circle_filled(center, radius, fill);
-                ui.painter().circle_stroke(center, radius, egui::Stroke::new(1.0, accent));
+                ui.painter()
+                    .circle_stroke(center, radius, egui::Stroke::new(1.0_f32, accent));
 
                 let start_angle = PI * 0.75;
                 let end_angle = PI * 2.25;
@@ -125,7 +131,7 @@ fn draw_real_knob(ui: &mut Ui, label: &str, value: &mut f32, accent: Color32, on
 
                 ui.painter().line_segment(
                     [line_start, line_end],
-                    Stroke::new(1.5, accent), // Thinner needle for 15px knob
+                    Stroke::new(1.5_f32, accent), // Thinner needle for 15px knob
                 );
             }
 

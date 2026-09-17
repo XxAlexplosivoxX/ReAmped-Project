@@ -1,5 +1,5 @@
-use egui::{Color32, Sense};
 use crate::PlayerApp;
+use egui::{Color32, Sense};
 
 const DEBUG_SWATCH_SIZE: f32 = 18.0;
 
@@ -61,19 +61,29 @@ pub fn show_cover(ui: &mut egui::Ui, player: &mut PlayerApp) {
                     .show(ui, |ui| {
                         for (name, rgb) in &roles {
                             let swatch = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-                            let text_color = if (rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3 > 128 {
-                                Color32::BLACK
-                            } else {
-                                Color32::WHITE
-                            };
+                            let text_color =
+                                if (rgb[0] as u16 + rgb[1] as u16 + rgb[2] as u16) / 3 > 128 {
+                                    Color32::BLACK
+                                } else {
+                                    Color32::WHITE
+                                };
                             egui::Frame::new()
                                 .fill(swatch)
                                 .corner_radius(2.0)
                                 .show(ui, |ui| {
-                                    ui.set_min_size(egui::vec2(DEBUG_SWATCH_SIZE * 2.0, DEBUG_SWATCH_SIZE));
+                                    ui.set_min_size(egui::vec2(
+                                        DEBUG_SWATCH_SIZE * 2.0,
+                                        DEBUG_SWATCH_SIZE,
+                                    ));
                                     ui.label(egui::RichText::new(*name).color(text_color));
                                 });
-                            ui.label(egui::RichText::new(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])).color(swatch));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "#{:02X}{:02X}{:02X}",
+                                    rgb[0], rgb[1], rgb[2]
+                                ))
+                                .color(swatch),
+                            );
                             ui.end_row();
                         }
                     });
