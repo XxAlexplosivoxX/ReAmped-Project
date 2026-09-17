@@ -1,12 +1,5 @@
 use player_core::Track;
 
-/// Window-level action requested through the MPRIS root interface.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MprisAction {
-    Raise,
-    Quit,
-}
-
 /// Snapshot of the playback state pushed to the MPRIS service.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaSnapshot {
@@ -24,7 +17,8 @@ pub struct MediaSnapshot {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{MediaSnapshot, MprisAction};
+    use super::MediaSnapshot;
+    use crate::utils::app_action::{AppAction, spawn_quit_watchdog};
     use crate::utils::misc::find_folder_cover;
     use async_channel::{Sender, unbounded};
     use async_std::task;
@@ -48,7 +42,6 @@ mod linux {
     pub struct MediaControls {
         tx: Sender<MediaEvent>,
         last_snapshot: Arc<Mutex<Option<MediaSnapshot>>>,
-        action_rx: Arc<Mutex<std_mpsc::Receiver<MprisAction>>>,
     }
 
     enum MediaEvent {
@@ -230,9 +223,8 @@ mod linux {
     }
 
     impl MediaControls {
-        pub fn start(core_player: CorePlayer) -> Self {
+        pub fn start(core_player: CorePlayer, actions: std_mpsc::Sender<AppAction>) -> Self {
             let (tx, rx) = unbounded::<MediaEvent>();
-            let (action_tx, action_rx) = std_mpsc::channel::<MprisAction>();
             let applied_volume = Arc::new(Mutex::new(-1.0));
 
             thread::spawn(move || {
@@ -251,15 +243,16 @@ mod linux {
                         .expect("failed to start MPRIS service");
 
                     player.connect_raise({
-                        let action_tx = action_tx.clone();
+                        let actions = actions.clone();
                         move |_| {
-                            let _ = action_tx.send(MprisAction::Raise);
+                            let _ = actions.send(AppAction::Show);
                         }
                     });
                     player.connect_quit({
-                        let action_tx = action_tx.clone();
+                        let actions = actions.clone();
                         move |_| {
-                            let _ = action_tx.send(MprisAction::Quit);
+                            let _ = actions.send(AppAction::Quit);
+                            spawn_quit_watchdog();
                         }
                     });
                     player.connect_play({
@@ -361,7 +354,6 @@ mod linux {
             Self {
                 tx,
                 last_snapshot: Arc::new(Mutex::new(None)),
-                action_rx: Arc::new(Mutex::new(action_rx)),
             }
         }
 
@@ -373,11 +365,6 @@ mod linux {
 
             *last_snapshot = Some(snapshot.clone());
             let _ = self.tx.try_send(MediaEvent::Sync(snapshot));
-        }
-
-        /// Pops a pending window action requested through MPRIS.
-        pub fn poll_action(&self) -> Option<MprisAction> {
-            self.action_rx.lock().unwrap().try_recv().ok()
         }
     }
 
@@ -438,21 +425,21 @@ mod linux {
 
 #[cfg(not(target_os = "linux"))]
 mod fallback {
-    use super::{MediaSnapshot, MprisAction};
+    use super::MediaSnapshot;
+    use player_core::Player;
+    use std::sync::mpsc::Sender;
+
+    use crate::utils::app_action::AppAction;
 
     #[derive(Clone)]
     pub struct MediaControls;
 
     impl MediaControls {
-        pub fn start(_core_player: player_core::Player) -> Self {
+        pub fn start(_core_player: Player, _actions: Sender<AppAction>) -> Self {
             Self
         }
 
         pub fn sync_from_snapshot(&self, _snapshot: MediaSnapshot) {}
-
-        pub fn poll_action(&self) -> Option<MprisAction> {
-            None
-        }
     }
 }
 

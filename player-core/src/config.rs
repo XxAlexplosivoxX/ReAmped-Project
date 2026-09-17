@@ -71,6 +71,10 @@ pub struct AppConfig {
     /// Enable vsync (may cause freezes on Hyprland when switching workspaces).
     #[serde(default = "default_true")]
     pub vsync: bool,
+    /// Hide to the system tray (keeping playback) instead of quitting when
+    /// the window is closed.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
 }
 
 fn default_eq_gain() -> f32 { 1.0 }
@@ -230,6 +234,7 @@ impl Default for AppConfig {
             width_val: 1.0,
             target_fps: default_fps(),
             vsync: default_true(),
+            close_to_tray: default_true(),
         }
     }
 }

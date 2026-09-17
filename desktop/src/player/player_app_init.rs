@@ -1,9 +1,11 @@
 use crate::utils::{
+    app_action::{AppActionRx, app_action_channel},
     media_controls::{MediaControls, MediaSnapshot},
     misc::{
         extract_palette, extract_palette_from_bytes, find_folder_cover, get_system_wallpaper_buffer,
     },
     scan_music_dirs::scan_music_dirs,
+    tray::{TrayHandle, start as start_tray},
     visualizer::SpectrumVisualizer,
 };
 use egui::{Color32, ColorImage};
@@ -60,23 +62,33 @@ pub struct PlayerApp {
     pub show_palette_debug: bool,
     pub last_scrolled_track: Option<std::path::PathBuf>,
     pub pending_cover_result: SharedCoverResult,
+    /// Receiver for window actions requested by MPRIS / the tray.
+    pub action_rx: AppActionRx,
+    /// Tray service handle (`None` without an SNI host or off Linux).
+    pub tray: Option<TrayHandle>,
+    /// True while a quit is in progress (from tray or MPRIS).
+    pub quitting: bool,
+    /// Whether the window is currently hidden (background playback).
+    pub window_hidden: bool,
 }
 
 impl Default for PlayerApp {
     fn default() -> Self {
-        Self::new(Vec::new())
+        Self::new(Vec::new(), false)
     }
 }
 
 impl PlayerApp {
-    pub fn new(startup_tracks: Vec<Track>) -> Self {
+    pub fn new(startup_tracks: Vec<Track>, start_hidden: bool) -> Self {
         let config_values = load_config();
         let config = Arc::new(Mutex::new(config_values.clone()));
         let visualizer = SpectrumVisualizer::new(config.clone());
         let player = PlayerBuilder::new()
             .with_volume(config_values.volume)
             .build();
-        let media_controls = MediaControls::start(player.clone());
+        let (action_tx, action_rx) = app_action_channel();
+        let media_controls = MediaControls::start(player.clone(), action_tx.clone());
+        let tray = start_tray(player.clone(), action_tx);
         let default_palette = M3Palette::default();
 
         let app = Self {
@@ -112,6 +124,10 @@ impl PlayerApp {
             show_palette_debug: false,
             last_scrolled_track: None,
             pending_cover_result: Arc::new(Mutex::new(None)),
+            action_rx,
+            tray,
+            quitting: false,
+            window_hidden: start_hidden,
         };
 
         app.player.send(PlayerCommand::SetGainBass(app.bass_val));
@@ -127,6 +143,7 @@ impl PlayerApp {
     fn spawn_media_sync_thread(&self) {
         let player = self.player.clone();
         let media_controls = self.media_controls.clone();
+        let tray = self.tray.clone();
 
         thread::spawn(move || {
             loop {
@@ -134,7 +151,7 @@ impl PlayerApp {
                 let playlist_idx = player.playlist_idx();
                 let current_track = playlist.get(playlist_idx).cloned();
 
-                media_controls.sync_from_snapshot(MediaSnapshot {
+                let snapshot = MediaSnapshot {
                     current_track,
                     playing: player.is_playing(),
                     playlist_len: playlist.len(),
@@ -145,7 +162,12 @@ impl PlayerApp {
                     shuffle: player.shuffle(),
                     repeat: player.repeat(),
                     repeat_one: player.repeat_one(),
-                });
+                };
+
+                media_controls.sync_from_snapshot(snapshot.clone());
+                if let Some(tray) = &tray {
+                    tray.sync(&snapshot);
+                }
 
                 thread::sleep(Duration::from_millis(150));
             }

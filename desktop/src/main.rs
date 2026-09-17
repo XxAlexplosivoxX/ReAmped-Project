@@ -34,6 +34,8 @@ use crate::{
 fn main() -> eframe::Result<()> {
     let config = load_config();
 
+    let start_hidden = std::env::args_os().skip(1).any(|arg| arg == "--tray");
+
     let startup_paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
@@ -46,7 +48,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([550.0, 310.0])
             .with_resizable(false)
-            .with_decorations(true),
+            .with_decorations(true)
+            .with_visible(!start_hidden),
         ..Default::default()
     };
 
@@ -61,7 +64,10 @@ fn main() -> eframe::Result<()> {
                 cc.egui_ctx
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
             }
-            Ok(Box::new(PlayerApp::new(startup_tracks.clone())))
+            Ok(Box::new(PlayerApp::new(
+                startup_tracks.clone(),
+                start_hidden,
+            )))
         }),
     )
 }

@@ -1,3 +1,4 @@
+pub mod app_action;
 pub mod background;
 pub mod cache;
 pub mod keyboard;
@@ -5,5 +6,6 @@ pub mod marquee_text;
 pub mod media_controls;
 pub mod misc;
 pub mod scan_music_dirs;
+pub mod tray;
 pub mod truncate;
 pub mod visualizer;
