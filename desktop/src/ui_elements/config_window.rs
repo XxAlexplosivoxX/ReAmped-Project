@@ -258,15 +258,6 @@ pub fn show_config_window(player: &mut PlayerApp, ctx: &Context, accent: Color32
                             if ui.checkbox(&mut cfg.vsync, "Vsync").changed() {
                                 save_config(&cfg);
                             }
-                            if ui
-                                .checkbox(
-                                    &mut cfg.close_to_tray,
-                                    "Cerrar a la bandeja del sistema (seguir reproduciendo)",
-                                )
-                                .changed()
-                            {
-                                save_config(&cfg);
-                            }
 
                             ui.add_space(10.0);
                             ui.heading("Reproducción");

@@ -23,3 +23,5 @@ async-channel = "2.5.0"
 async-std = { version = "1.13.2", features = ["unstable"] }
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 mpris-server = "0.10.0"
+signal-hook = "0.4"
+winit = "0.30"

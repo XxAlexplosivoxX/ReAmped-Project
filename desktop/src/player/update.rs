@@ -14,41 +14,13 @@ use crate::{
         volume_bar::show_volume_bar,
     },
     utils::{
-        app_action::AppAction, background::draw_slanted_vertical_gradient,
-        keyboard::handle_keyboard_input, visualizer::draw_waveform_raw,
+        background::draw_slanted_vertical_gradient, keyboard::handle_keyboard_input,
+        visualizer::draw_waveform_raw,
     },
 };
 
 impl eframe::App for PlayerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Some(action) = self.action_rx.try_recv() {
-            match action {
-                AppAction::Show => {
-                    self.window_hidden = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                AppAction::Quit => {
-                    self.quitting = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
-
-        if !self.quitting
-            && ctx.input(|i| i.viewport().close_requested())
-            && self.config.lock().unwrap().close_to_tray
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.window_hidden = true;
-        }
-
-        if self.window_hidden {
-            ctx.request_repaint_after(Duration::from_millis(500));
-            return;
-        }
-
         let physical_width = ctx.input(|i| i.viewport_rect().width() * i.pixels_per_point());
 
         let base_width = 532.0;

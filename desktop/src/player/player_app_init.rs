@@ -1,15 +1,14 @@
 use crate::utils::{
-    app_action::{AppActionRx, app_action_channel},
     media_controls::{MediaControls, MediaSnapshot},
     misc::{
         extract_palette, extract_palette_from_bytes, find_folder_cover, get_system_wallpaper_buffer,
     },
     scan_music_dirs::scan_music_dirs,
-    tray::{TrayHandle, start as start_tray},
+    tray::TrayHandle,
     visualizer::SpectrumVisualizer,
 };
 use egui::{Color32, ColorImage};
-use player_core::config::{AppConfig, M3Palette, ThemeSource, load_config};
+use player_core::config::{AppConfig, M3Palette, ThemeSource};
 use player_core::metadata::is_default_cover;
 use player_core::{Options, Player, PlayerBuilder, PlayerCommand, Track, metadata::CoverArt};
 use std::collections::HashSet;
@@ -30,7 +29,6 @@ pub struct PlayerApp {
     pub player: Player,
     pub volume: f32,
     pub visualizer: SpectrumVisualizer,
-    pub media_controls: MediaControls,
     pub cover_texture: Option<egui::TextureHandle>,
     pub previous_cover_data: Vec<u8>,
     pub position: f32,
@@ -62,40 +60,23 @@ pub struct PlayerApp {
     pub show_palette_debug: bool,
     pub last_scrolled_track: Option<std::path::PathBuf>,
     pub pending_cover_result: SharedCoverResult,
-    /// Receiver for window actions requested by MPRIS / the tray.
-    pub action_rx: AppActionRx,
-    /// Tray service handle (`None` without an SNI host or off Linux).
-    pub tray: Option<TrayHandle>,
-    /// True while a quit is in progress (from tray or MPRIS).
-    pub quitting: bool,
-    /// Whether the window is currently hidden (background playback).
-    pub window_hidden: bool,
-}
-
-impl Default for PlayerApp {
-    fn default() -> Self {
-        Self::new(Vec::new(), false)
-    }
 }
 
 impl PlayerApp {
-    pub fn new(startup_tracks: Vec<Track>, start_hidden: bool) -> Self {
-        let config_values = load_config();
-        let config = Arc::new(Mutex::new(config_values.clone()));
+    /// Builds the shared audio engine and GUI state. Tray, MPRIS and the media
+    /// sync thread are owned by the main thread (see [`spawn_media_sync_thread`]).
+    pub fn new(config: Arc<Mutex<AppConfig>>, startup_tracks: Vec<Track>) -> Self {
+        let config_values = config.lock().unwrap().clone();
         let visualizer = SpectrumVisualizer::new(config.clone());
         let player = PlayerBuilder::new()
             .with_volume(config_values.volume)
             .build();
-        let (action_tx, action_rx) = app_action_channel();
-        let media_controls = MediaControls::start(player.clone(), action_tx.clone());
-        let tray = start_tray(player.clone(), action_tx);
         let default_palette = M3Palette::default();
 
         let app = Self {
             player,
             volume: config_values.volume,
             visualizer,
-            media_controls,
             cover_texture: None,
             previous_cover_data: Vec::new(),
             position: 0.0,
@@ -124,10 +105,6 @@ impl PlayerApp {
             show_palette_debug: false,
             last_scrolled_track: None,
             pending_cover_result: Arc::new(Mutex::new(None)),
-            action_rx,
-            tray,
-            quitting: false,
-            window_hidden: start_hidden,
         };
 
         app.player.send(PlayerCommand::SetGainBass(app.bass_val));
@@ -136,42 +113,19 @@ impl PlayerApp {
         app.player
             .send(PlayerCommand::SetExpanderWidth(app.width_val));
 
-        app.spawn_media_sync_thread();
         app
     }
 
-    fn spawn_media_sync_thread(&self) {
-        let player = self.player.clone();
-        let media_controls = self.media_controls.clone();
-        let tray = self.tray.clone();
-
-        thread::spawn(move || {
-            loop {
-                let playlist = player.playlist();
-                let playlist_idx = player.playlist_idx();
-                let current_track = playlist.get(playlist_idx).cloned();
-
-                let snapshot = MediaSnapshot {
-                    current_track,
-                    playing: player.is_playing(),
-                    playlist_len: playlist.len(),
-                    playlist_idx,
-                    position: player.position(),
-                    duration: player.duration(),
-                    volume: player.volume(),
-                    shuffle: player.shuffle(),
-                    repeat: player.repeat(),
-                    repeat_one: player.repeat_one(),
-                };
-
-                media_controls.sync_from_snapshot(snapshot.clone());
-                if let Some(tray) = &tray {
-                    tray.sync(&snapshot);
-                }
-
-                thread::sleep(Duration::from_millis(150));
-            }
-        });
+    /// Builds a GUI-only copy for a freshly opened window. Shared handles
+    /// (audio engine, config, visualizer) are cloned; per-window GPU state
+    /// (cover texture) starts empty.
+    pub fn clone_for_gui(&self) -> Self {
+        let mut app = self.clone();
+        app.cover_texture = None;
+        app.previous_cover_data.clear();
+        app.pending_cover_result = Arc::new(Mutex::new(None));
+        app.last_scrolled_track = None;
+        app
     }
 
     fn apply_m3_visuals(palette: &M3Palette, ctx: &egui::Context) {
@@ -365,4 +319,40 @@ impl PlayerApp {
             }
         });
     }
+}
+
+/// Periodically pushes playback state to MPRIS and the system tray. Lives on
+/// the main thread, independent of any GUI window.
+pub fn spawn_media_sync_thread(
+    player: Player,
+    media_controls: MediaControls,
+    tray: Option<TrayHandle>,
+) {
+    thread::spawn(move || {
+        loop {
+            let playlist = player.playlist();
+            let playlist_idx = player.playlist_idx();
+            let current_track = playlist.get(playlist_idx).cloned();
+
+            let snapshot = MediaSnapshot {
+                current_track,
+                playing: player.is_playing(),
+                playlist_len: playlist.len(),
+                playlist_idx,
+                position: player.position(),
+                duration: player.duration(),
+                volume: player.volume(),
+                shuffle: player.shuffle(),
+                repeat: player.repeat(),
+                repeat_one: player.repeat_one(),
+            };
+
+            media_controls.sync_from_snapshot(snapshot.clone());
+            if let Some(tray) = &tray {
+                tray.sync(&snapshot);
+            }
+
+            thread::sleep(Duration::from_millis(150));
+        }
+    });
 }
