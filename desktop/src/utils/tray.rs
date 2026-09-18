@@ -2,7 +2,7 @@
 //!
 //!   [sync thread] --MediaSnapshot--> TrayHandle::sync --> ksni service
 //!   menu / activate --PlayerCommand--> audio engine
-//!                 \-> AppAction::Show/Quit --> UI update()
+//!                 \-> AppAction::Show/Quit --> main action loop
 //!
 //! Requires a StatusNotifierItem host (KDE, waybar, GNOME + AppIndicator…).
 //! If none is available the service logs and the app keeps running without

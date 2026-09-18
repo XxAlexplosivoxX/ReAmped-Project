@@ -42,8 +42,8 @@ use crate::{
     player::player_app_init::{PlayerApp, spawn_media_sync_thread},
     utils::{
         app_action::{
-            AppAction, app_action_channel, check_single_instance, cleanup_pid_file,
-            spawn_quit_watchdog,
+            AppAction, app_action_channel, cleanup_pid_file, forward_to_existing,
+            spawn_quit_watchdog, start_ipc_listener,
         },
         media_controls::MediaControls,
         misc::setup_fonts,
@@ -53,18 +53,19 @@ use crate::{
 };
 
 fn main() {
-    // Single instance: signal the running process and leave.
-    if check_single_instance() {
-        return;
-    }
-    let _guard = PidCleanupGuard;
-
     let start_hidden = std::env::args_os().skip(1).any(|arg| arg == "--tray");
     let startup_paths: Vec<PathBuf> = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
         .filter(|path| !path.to_string_lossy().starts_with('-'))
         .collect();
+
+    // If another instance is running, hand the files over and leave.
+    if forward_to_existing(&startup_paths) {
+        return;
+    }
+    let _guard = PidCleanupGuard;
+
     let startup_tracks = scan_music_inputs(&startup_paths);
 
     let config: Arc<Mutex<AppConfig>> = Arc::new(Mutex::new(load_config()));
@@ -76,6 +77,7 @@ fn main() {
     let fullscreen = config.lock().unwrap().fullscreen;
 
     let (action_tx, action_rx) = app_action_channel();
+    start_ipc_listener(action_tx.clone());
 
     let media_controls = MediaControls::start(player.clone(), action_tx.clone());
     let tray: Option<TrayHandle> = start_tray(player.clone(), action_tx.clone());
@@ -103,6 +105,26 @@ fn main() {
         while let Some(action) = action_rx.try_recv() {
             match action {
                 AppAction::Show => show = true,
+                AppAction::Open(paths) => {
+                    show = true;
+                    let player = player.clone();
+                    thread::spawn(move || {
+                        let mut new_tracks = scan_music_inputs(&paths);
+                        if new_tracks.is_empty() {
+                            return;
+                        }
+                        // Prepend the requested tracks, dropping any duplicate
+                        // copies already present later in the playlist.
+                        let added: std::collections::HashSet<_> =
+                            new_tracks.iter().map(|t| t.path.clone()).collect();
+                        let mut existing = player.playlist();
+                        existing.retain(|t| !added.contains(&t.path));
+                        new_tracks.extend(existing);
+                        player.send(player_core::PlayerCommand::SetPlaylistAndPlayIndex(
+                            new_tracks, 0,
+                        ));
+                    });
+                }
                 AppAction::Quit => {
                     player.send(player_core::PlayerCommand::Stop);
                     spawn_quit_watchdog();
